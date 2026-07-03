@@ -1,0 +1,17 @@
+{
+  "final-idea": {
+    "label": "final idea",
+    "accent": "#B0552A",
+    "blurb": "research positions that have settled enough to publish"
+  },
+  "deep-conversation": {
+    "label": "deep conversation",
+    "accent": "#3A6E5B",
+    "blurb": "multi-turn exchanges that produced something worth keeping"
+  },
+  "paper-research": {
+    "label": "paper research",
+    "accent": "#3B5A8C",
+    "blurb": "distillations of the wider literature"
+  }
+}

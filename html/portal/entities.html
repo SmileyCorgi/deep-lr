@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Entities — Portal</title>
+<link rel="stylesheet" href="/html/portal/lib/portal.css" />
+</head>
+<body>
+<div class="shell">
+  <main class="main">
+    <div class="topstrip">
+      <div class="crumbs"><strong>Entities</strong></div>
+      <div class="meta"><span id="count"></span></div>
+    </div>
+    <div class="list-shell">
+      <h1>Entities</h1>
+      <div class="sublede">Anchor papers with TL;DR / Method / Results — the per-paper pages cited from topic and synthesis prose.</div>
+      <div class="filterbar">
+        <input type="text" class="text" id="filter" placeholder="filter by slug, title, author, theme…" />
+        <select id="venue"><option value="">all venues</option></select>
+        <select id="category">
+          <option value="">all categories</option>
+        </select>
+        <select id="track">
+          <option value="">any track</option>
+          <option value="oral">oral</option>
+          <option value="poster">poster</option>
+          <option value="findings">findings</option>
+        </select>
+        <button class="clear" id="clear">clear</button>
+      </div>
+      <table class="list-table" id="tbl">
+        <thead><tr>
+          <th data-sort="slug">slug</th>
+          <th data-sort="title">title</th>
+          <th data-sort="venue">venue</th>
+          <th data-sort="category">category</th>
+          <th data-sort="cited" class="right">cited</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </main>
+</div>
+<script src="/html/portal/lib/portal.js" defer></script>
+<script defer>
+let rows = [];
+let sortKey = "cited", sortDesc = true;
+
+document.addEventListener("DOMContentLoaded", function () {
+  Portal.mountRail("entities");
+  Portal.loadIndex().then(function (idx) {
+    const ents = (idx.pages || []).filter(function (p) { return p.type === "entity"; });
+    rows = ents.map(function (p) {
+      const cited = ((idx.backlinks || {})[p.slug] || []).length;
+      return {
+        slug: p.slug,
+        title: p.title || p.slug,
+        tldr: p.tldr || "",
+        venue: (p.frontmatter && p.frontmatter.venue) || "",
+        track: (p.frontmatter && p.frontmatter.track) || "",
+        category: (p.frontmatter && p.frontmatter.category) || "",
+        themes: (p.frontmatter && p.frontmatter.themes) || [],
+        cited: cited,
+        updated: p.updated || "",
+      };
+    });
+    // populate venue + category dropdowns
+    const venues = Array.from(new Set(rows.map(function (r) { return r.venue; }).filter(Boolean))).sort();
+    const cats = Array.from(new Set(rows.map(function (r) { return r.category; }).filter(Boolean))).sort();
+    document.getElementById("venue").insertAdjacentHTML("beforeend",
+      venues.map(function (v) { return '<option value="' + Portal.escapeAttr(v) + '">' + Portal.escapeHtml(v) + "</option>"; }).join(""));
+    document.getElementById("category").insertAdjacentHTML("beforeend",
+      cats.map(function (c) { return '<option value="' + Portal.escapeAttr(c) + '">' + Portal.escapeHtml(c) + "</option>"; }).join(""));
+    render();
+  });
+
+  ["filter", "venue", "category", "track"].forEach(function (id) {
+    document.getElementById(id).addEventListener("input", render);
+    document.getElementById(id).addEventListener("change", render);
+  });
+  document.getElementById("clear").addEventListener("click", function () {
+    ["filter", "venue", "category", "track"].forEach(function (id) {
+      document.getElementById(id).value = "";
+    });
+    render();
+  });
+  document.querySelectorAll("#tbl th[data-sort]").forEach(function (th) {
+    th.addEventListener("click", function () {
+      const k = th.dataset.sort;
+      if (sortKey === k) sortDesc = !sortDesc;
+      else { sortKey = k; sortDesc = (k === "cited"); }
+      render();
+    });
+  });
+});
+
+function render() {
+  const q = (document.getElementById("filter").value || "").toLowerCase().trim();
+  const v = document.getElementById("venue").value;
+  const c = document.getElementById("category").value;
+  const t = document.getElementById("track").value;
+  let filtered = rows.filter(function (r) {
+    if (v && r.venue !== v) return false;
+    if (c && r.category !== c) return false;
+    if (t && r.track !== t) return false;
+    if (!q) return true;
+    const hay = (r.slug + " " + r.title + " " + r.tldr + " " + r.themes.join(" ")).toLowerCase();
+    return q.split(/\s+/).every(function (term) { return hay.indexOf(term) !== -1; });
+  });
+  filtered.sort(function (a, b) {
+    const av = a[sortKey], bv = b[sortKey];
+    if (typeof av === "number") return sortDesc ? bv - av : av - bv;
+    return sortDesc ? String(bv).localeCompare(String(av)) : String(av).localeCompare(String(bv));
+  });
+  document.getElementById("count").textContent = filtered.length + " / " + rows.length + " entities";
+  document.querySelector("#tbl tbody").innerHTML = filtered.map(function (r) {
+    return '<tr>' +
+      '<td><a href="/html/portal/page.html?slug=' + encodeURIComponent(r.slug) + '"><code style="font-size:11.5px;">' + Portal.escapeHtml(r.slug) + "</code></a></td>" +
+      '<td class="title"><a href="/html/portal/page.html?slug=' + encodeURIComponent(r.slug) + '">' + Portal.escapeHtml(r.title) + "</a>" +
+        (r.tldr ? '<span class="tldr">' + Portal.escapeHtml(r.tldr.slice(0, 240)) + "</span>" : "") + "</td>" +
+      '<td class="dim">' + Portal.escapeHtml(r.venue) + (r.track ? ' <span class="badge ' + (r.track === "oral" ? "oral" : "") + '">' + Portal.escapeHtml(r.track) + "</span>" : "") + "</td>" +
+      '<td class="dim">' + Portal.escapeHtml(r.category) + "</td>" +
+      '<td class="right dim">' + r.cited + "</td>" +
+    "</tr>";
+  }).join("");
+}
+</script>
+</body>
+</html>

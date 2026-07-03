@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Page — deep-lr Portal</title>
+<link rel="stylesheet" href="/html/portal/lib/portal.css" />
+</head>
+<body>
+<div class="shell">
+  <main class="main">
+    <div class="topstrip">
+      <div class="crumbs" id="crumbs">…</div>
+      <div class="meta" id="page-meta"></div>
+    </div>
+    <div class="page-layout">
+      <aside class="toc-col" id="toc-col">
+        <h4>On this page</h4>
+        <ol id="toc"></ol>
+      </aside>
+      <div class="body-col">
+        <article id="body">
+          <p style="color:var(--muted);">loading…</p>
+        </article>
+      </div>
+      <aside class="side-col" id="side"></aside>
+    </div>
+  </main>
+</div>
+<script src="/html/portal/lib/portal.js" defer></script>
+<script defer>
+document.addEventListener("DOMContentLoaded", function () {
+  const slug = new URLSearchParams(location.search).get("slug");
+  if (!slug) {
+    document.getElementById("body").innerHTML =
+      '<p style="color:var(--accent-warn)">no slug specified</p>';
+    Portal.mountRail(null);
+    return;
+  }
+  Portal.loadIndex().then(function (idx) {
+    const page = idx._bySlug[slug];
+    if (!page) {
+      document.title = slug + " — not found";
+      Portal.mountRail(null);
+      document.getElementById("body").innerHTML =
+        '<h1>not in wiki: <code>' + Portal.escapeHtml(slug) + "</code></h1>" +
+        '<p>This slug is wikilinked from elsewhere but has no page yet.</p>';
+      const bl = (idx.backlinks || {})[slug] || [];
+      if (bl.length) {
+        document.getElementById("body").innerHTML += "<h2>Linked from</h2><ul>" +
+          bl.map(function (b) {
+            return '<li><a href="/html/portal/page.html?slug=' + encodeURIComponent(b.from) + '">' +
+                   Portal.escapeHtml(b.from_title || b.from) + "</a> <small style='color:var(--muted)'>(" + b.from_type + ")</small></li>";
+          }).join("") + "</ul>";
+      }
+      return;
+    }
+
+    document.title = (page.title || page.slug) + " — Portal";
+    Portal.mountRail(railKeyFor(page.type));
+    renderCrumbs(page);
+    renderMeta(page);
+    renderSide(page, idx);
+
+    fetchRaw(page).then(function (md) {
+      // Strip frontmatter for display.
+      const stripped = md.replace(/^---\s*[\s\S]*?\n---\s*\n?/, "");
+      Portal.renderMarkdown(stripped, document.getElementById("body")).then(function () {
+        buildToc(page);
+        setupScrollSpy();
+      });
+    }).catch(function (e) {
+      document.getElementById("body").innerHTML =
+        '<p style="color:var(--accent-warn)">failed to load source: ' + Portal.escapeHtml(String(e)) + "</p>";
+    });
+  });
+});
+
+function railKeyFor(t) {
+  return t === "topic" ? "topics"
+       : t === "entity" ? "entities"
+       : t === "synthesis" ? "synthesis"
+       : null;
+}
+
+function fetchRaw(page) {
+  const url = "/" + page.path;
+  return fetch(url, { cache: "no-cache" }).then(function (r) {
+    if (!r.ok) throw new Error("HTTP " + r.status + " for " + url);
+    return r.text();
+  });
+}
+
+function renderCrumbs(page) {
+  const parent =
+    page.type === "topic" ? '<a href="/html/portal/topics.html">topics</a>' :
+    page.type === "entity" ? '<a href="/html/portal/entities.html">entities</a>' :
+    page.type === "synthesis" ? '<a href="/html/portal/synthesis.html">synthesis</a>' :
+    page.type === "corpus" ? '<span>corpus</span>' :
+    '<span>' + page.type + '</span>';
+  document.getElementById("crumbs").innerHTML =
+    parent + '<span class="sep">/</span><strong>' + Portal.escapeHtml(page.slug) + "</strong>";
+}
+
+function renderMeta(page) {
+  const fm = page.frontmatter || {};
+  const chips = [];
+  if (fm.venue)  chips.push('<span class="chip">' + Portal.escapeHtml(fm.venue) + "</span>");
+  if (fm.track)  chips.push('<span class="chip ' + (fm.track === "oral" ? "oral" : "") + '">' + Portal.escapeHtml(fm.track) + "</span>");
+  if (fm.category) chips.push('<span class="chip">' + Portal.escapeHtml(fm.category) + "</span>");
+  if (fm.sources) chips.push('<span class="chip">' + Portal.escapeHtml(String(fm.sources)) + " sources</span>");
+  if (page.updated) chips.push('<span class="chip">updated ' + Portal.escapeHtml(page.updated) + "</span>");
+  document.getElementById("page-meta").innerHTML = chips.join("");
+}
+
+function renderSide(page, idx) {
+  let html = "";
+
+  if (page.type === "topic") {
+    // Show subset of out-links as "anchors", grouped by entity venue.
+    const anchors = (page.out_links || []).map(function (s) { return idx._bySlug[s]; })
+      .filter(function (p) { return p && p.type === "entity"; });
+    if (anchors.length) {
+      const byVenue = {};
+      anchors.forEach(function (p) {
+        const v = (p.frontmatter && p.frontmatter.venue) || "other";
+        (byVenue[v] = byVenue[v] || []).push(p);
+      });
+      html += "<section><h4>Anchor entities · " + anchors.length + "</h4>";
+      Object.keys(byVenue).sort().forEach(function (v) {
+        html += '<div class="group-label">' + Portal.escapeHtml(v) + " · " + byVenue[v].length + "</div><ul>";
+        byVenue[v].forEach(function (p) {
+          html += '<li><a href="/html/portal/page.html?slug=' + encodeURIComponent(p.slug) + '">' +
+                  Portal.escapeHtml(p.slug) + "</a></li>";
+        });
+        html += "</ul>";
+      });
+      html += "</section>";
+    }
+    html += renderRelatedTopics(page, idx);
+  }
+
+  if (page.type === "entity") {
+    // Show topics this entity belongs to (any topic page that links to it).
+    const memberOf = [];
+    (idx.pages || []).forEach(function (p) {
+      if (p.type === "topic" && (p.out_links || []).indexOf(page.slug) !== -1) {
+        memberOf.push(p);
+      }
+    });
+    if (memberOf.length) {
+      html += "<section><h4>Topics</h4><ul>";
+      memberOf.forEach(function (p) {
+        html += '<li><a href="/html/portal/page.html?slug=' + encodeURIComponent(p.slug) + '">' +
+                Portal.escapeHtml(p.slug) + "</a></li>";
+      });
+      html += "</ul></section>";
+    }
+    // Outgoing entity citations.
+    const out = (page.out_links || []).map(function (s) { return idx._bySlug[s]; })
+      .filter(function (p) { return p && p.type === "entity"; });
+    if (out.length) {
+      html += "<section><h4>Cites · " + out.length + "</h4><ul>";
+      out.slice(0, 30).forEach(function (p) {
+        html += '<li><a href="/html/portal/page.html?slug=' + encodeURIComponent(p.slug) + '">' +
+                Portal.escapeHtml(p.slug) + "</a></li>";
+      });
+      html += "</ul></section>";
+    }
+  }
+
+  if (page.type === "synthesis") {
+    // Show topics + entities it references.
+    const out = (page.out_links || []).map(function (s) { return idx._bySlug[s]; }).filter(Boolean);
+    const tOut = out.filter(function (p) { return p.type === "topic"; });
+    const eOut = out.filter(function (p) { return p.type === "entity"; });
+    if (tOut.length) {
+      html += "<section><h4>Topics covered · " + tOut.length + "</h4><ul>";
+      tOut.forEach(function (p) {
+        html += '<li><a href="/html/portal/page.html?slug=' + encodeURIComponent(p.slug) + '">' +
+                Portal.escapeHtml(p.slug) + "</a></li>";
+      });
+      html += "</ul></section>";
+    }
+    if (eOut.length) {
+      html += "<section><h4>Anchors cited · " + eOut.length + "</h4><ul>";
+      eOut.slice(0, 30).forEach(function (p) {
+        html += '<li><a href="/html/portal/page.html?slug=' + encodeURIComponent(p.slug) + '">' +
+                Portal.escapeHtml(p.slug) + "</a></li>";
+      });
+      html += "</ul></section>";
+    }
+  }
+
+  // Backlinks for every page type.
+  const bl = (idx.backlinks || {})[page.slug] || [];
+  html += '<section><h4>Cited by · ' + bl.length + "</h4>";
+  if (bl.length === 0) {
+    html += '<div class="empty">no inbound links</div>';
+  } else {
+    const grouped = { topic: [], synthesis: [], entity: [], corpus: [], other: [] };
+    bl.forEach(function (b) {
+      (grouped[b.from_type] || grouped.other).push(b);
+    });
+    ["topic", "synthesis", "entity", "corpus", "other"].forEach(function (k) {
+      if (!grouped[k].length) return;
+      html += '<div class="group-label">' + k + " · " + grouped[k].length + "</div><ul>";
+      grouped[k].forEach(function (b) {
+        html += '<li><a href="/html/portal/page.html?slug=' + encodeURIComponent(b.from) + '">' +
+                Portal.escapeHtml(b.from) + "</a></li>";
+      });
+      html += "</ul>";
+    });
+  }
+  html += "</section>";
+
+  // Mentioning log entries.
+  const mentions = ((window._idx_log = (window._idx_log || (window.__idx = (window.__idx = window.__idx || null)))));
+  // simpler: walk log
+  const logHits = [];
+  (idx.log || []).forEach(function (e, i) {
+    if ((e.links || []).indexOf(page.slug) !== -1) logHits.push({ e: e, i: i });
+  });
+  if (logHits.length) {
+    html += '<section><h4>In log · ' + logHits.length + "</h4><ul>";
+    logHits.slice(0, 8).forEach(function (h) {
+      html += '<li><a href="/html/portal/activity.html#' + h.i + '">' +
+              Portal.escapeHtml(h.e.date) + " · " + Portal.escapeHtml(h.e.op) + "</a></li>";
+    });
+    html += "</ul></section>";
+  }
+
+  // Raw file pointer.
+  html += '<section><h4>Source</h4>' +
+          '<ul><li><a href="/' + Portal.escapeAttr(page.path) + '" target="_blank">' +
+          Portal.escapeHtml(page.path) + "</a></li></ul></section>";
+
+  document.getElementById("side").innerHTML = html;
+}
+
+function renderRelatedTopics(page, idx) {
+  // Compute co-citation neighbors: other topic pages sharing ≥2 wikilinked entities.
+  const mine = new Set(page.out_links || []);
+  const scores = [];
+  (idx.pages || []).forEach(function (p) {
+    if (p.type !== "topic" || p.slug === page.slug) return;
+    let shared = 0;
+    (p.out_links || []).forEach(function (s) { if (mine.has(s)) shared++; });
+    if (shared >= 2) scores.push({ slug: p.slug, n: shared });
+  });
+  scores.sort(function (a, b) { return b.n - a.n; });
+  if (!scores.length) return "";
+  let h = "<section><h4>Related topics</h4><ul>";
+  scores.slice(0, 8).forEach(function (x) {
+    h += '<li><a href="/html/portal/page.html?slug=' + encodeURIComponent(x.slug) + '">' +
+         Portal.escapeHtml(x.slug) + '</a> <small style="color:var(--muted)">· ' + x.n + " shared</small></li>";
+  });
+  h += "</ul></section>";
+  return h;
+}
+
+function buildToc(page) {
+  const body = document.getElementById("body");
+  const headings = body.querySelectorAll("h2");
+  if (!headings.length) {
+    document.getElementById("toc-col").style.display = "none";
+    return;
+  }
+  const ol = document.getElementById("toc");
+  let html = "";
+  headings.forEach(function (h, i) {
+    const id = "h-" + i;
+    h.id = id;
+    html += '<li data-tgt="' + id + '"><a href="#' + id + '">' +
+            Portal.escapeHtml(h.textContent) + "</a></li>";
+  });
+  ol.innerHTML = html;
+  ol.querySelectorAll("a").forEach(function (a) {
+    a.addEventListener("click", function (e) {
+      e.preventDefault();
+      const tgt = document.getElementById(a.getAttribute("href").slice(1));
+      if (tgt) { tgt.scrollIntoView({ behavior: "smooth", block: "start" }); }
+    });
+  });
+}
+
+function setupScrollSpy() {
+  const body = document.getElementById("body");
+  const headings = body.querySelectorAll("h2");
+  if (!headings.length) return;
+  const lis = document.querySelectorAll("#toc li");
+  const idToLi = {};
+  lis.forEach(function (li) { idToLi[li.dataset.tgt] = li; });
+  const obs = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (!e.isIntersecting) return;
+      lis.forEach(function (li) { li.classList.remove("active"); });
+      const li = idToLi[e.target.id];
+      if (li) li.classList.add("active");
+    });
+  }, { rootMargin: "-40% 0px -55% 0px" });
+  headings.forEach(function (h) { obs.observe(h); });
+}
+</script>
+</body>
+</html>

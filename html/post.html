@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>deep-lr — post</title>
+<link rel="stylesheet" href="/html/lib/style.css" />
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <div class="site-row">
+      <div>
+        <a href="/html/index.html" class="site-title">deep-lr</a>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="back-link-row">
+  <div class="wrap">
+    <a class="back-link" href="/html/index.html">&larr; all posts</a>
+  </div>
+</div>
+
+<article class="post-frame" id="post-frame">
+  <div class="post-status" id="post-status">loading&hellip;</div>
+
+  <!-- The post renderer (blog.js → renderPost) fills in the scaffolding
+       below at runtime. Empty containers are kept here so CSS layout
+       targets exist before JS runs, and so the grammar of the page is
+       readable from the markup alone:
+
+         1. .post-header           : meta row, title, dek, byline
+         2. .focus-block           : "THE GIST" / key findings card
+         3. .post-layout           : 2-column grid: side-TOC | body
+            ├─ .side-toc-col       : sticky left rail (hidden until inline TOC scrolls offscreen)
+            └─ .body-col           : inline TOC + body + references
+                ├─ .inline-toc     : on-page TOC (always visible on desktop)
+                ├─ .post-body      : marked.js-rendered article body
+                └─ .references     : auto-generated numbered references
+       Hidden by default; renderPost() swaps `hidden` off once content lands.
+  -->
+  <div class="post-shell" id="post-shell" hidden>
+    <section class="post-header" id="post-header"></section>
+    <aside class="focus-block" id="focus-block" hidden aria-label="Key findings"></aside>
+    <div class="post-layout">
+      <aside class="side-toc-col">
+        <nav class="side-toc" id="side-toc" data-hidden="true" aria-label="Section navigation" aria-hidden="true"></nav>
+      </aside>
+      <div class="body-col">
+        <nav class="inline-toc" id="inline-toc" data-open="true" aria-label="On this page" hidden></nav>
+        <div class="post-body" id="post-body"></div>
+        <section class="references" id="references" hidden>
+          <h2 id="references-heading">References</h2>
+          <ol id="refs-list"></ol>
+        </section>
+      </div>
+    </div>
+  </div>
+</article>
+
+<section class="more-in-cat" id="more-in-cat" hidden>
+  <p class="more-label" id="more-label">more in this category</p>
+  <div class="rows" id="more-list"></div>
+</section>
+
+<footer class="site">
+  <div class="wrap">
+    <span><a href="/html/index.html">&larr; back to catalog</a></span>
+    <span><a href="/blog/index.json">index.json</a></span>
+  </div>
+</footer>
+
+<script src="/html/lib/markdown.js" defer></script>
+<script src="/html/lib/canvas.js" defer></script>
+<script src="/html/lib/blog.js" defer></script>
+</body>
+</html>

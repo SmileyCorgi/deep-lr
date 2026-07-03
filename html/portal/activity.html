@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Activity — Portal</title>
+<link rel="stylesheet" href="/html/portal/lib/portal.css" />
+</head>
+<body>
+<div class="shell">
+  <main class="main">
+    <div class="topstrip">
+      <div class="crumbs"><strong>Activity</strong></div>
+      <div class="meta"><span id="count"></span></div>
+    </div>
+    <div class="list-shell" style="max-width:920px">
+      <h1>Activity log</h1>
+      <div class="sublede">Chronological record from <code>log.md</code>. Click a wikilink to open the page; click an entry body to expand.</div>
+      <div class="filterbar">
+        <input type="text" class="text" id="filter" placeholder="filter by subject, slug, op…" />
+        <select id="op"><option value="">all ops</option></select>
+        <button class="clear" id="clear">clear</button>
+      </div>
+      <div class="activity" id="stream"></div>
+    </div>
+  </main>
+</div>
+<script src="/html/portal/lib/portal.js" defer></script>
+<script defer>
+let entries = [];
+let theIdx = null;
+
+document.addEventListener("DOMContentLoaded", function () {
+  Portal.mountRail("activity");
+  Portal.loadIndex().then(function (idx) {
+    theIdx = idx;
+    entries = idx.log || [];
+    const ops = Array.from(new Set(entries.map(function (e) { return e.op; }))).sort();
+    document.getElementById("op").insertAdjacentHTML("beforeend",
+      ops.map(function (o) { return '<option value="' + Portal.escapeAttr(o) + '">' + Portal.escapeHtml(o) + "</option>"; }).join(""));
+    render();
+    if (location.hash) {
+      const i = parseInt(location.hash.slice(1), 10);
+      const target = document.getElementById("entry-" + i);
+      if (target) {
+        target.scrollIntoView({ block: "center" });
+        target.style.outline = "2px solid var(--accent-final)";
+      }
+    }
+  });
+  ["filter", "op"].forEach(function (id) {
+    document.getElementById(id).addEventListener("input", render);
+    document.getElementById(id).addEventListener("change", render);
+  });
+  document.getElementById("clear").addEventListener("click", function () {
+    document.getElementById("filter").value = "";
+    document.getElementById("op").value = "";
+    render();
+  });
+});
+
+function render() {
+  const q = (document.getElementById("filter").value || "").toLowerCase().trim();
+  const op = document.getElementById("op").value;
+  const filtered = entries.map(function (e, i) { return { e: e, i: i }; }).filter(function (x) {
+    if (op && x.e.op !== op) return false;
+    if (!q) return true;
+    const hay = (x.e.date + " " + x.e.op + " " + x.e.subject + " " + (x.e.body || "") + " " + (x.e.links || []).join(" ")).toLowerCase();
+    return q.split(/\s+/).every(function (t) { return hay.indexOf(t) !== -1; });
+  });
+  document.getElementById("count").textContent = filtered.length + " / " + entries.length + " entries";
+  const box = document.getElementById("stream");
+  box.innerHTML = filtered.map(function (x) {
+    const e = x.e;
+    const linksHtml = (e.links || []).map(function (slug) {
+      const exists = theIdx._bySlug.hasOwnProperty(slug);
+      const cls = exists ? "wiki" : "wiki broken";
+      const href = exists ? "/html/portal/page.html?slug=" + encodeURIComponent(slug) : "#";
+      return '<a class="' + cls + '" data-slug="' + Portal.escapeAttr(slug) + '" href="' + href + '">[[' + Portal.escapeHtml(slug) + "]]</a>";
+    }).join(" · ");
+    return '<div id="entry-' + x.i + '" class="entry op-' + Portal.escapeAttr(e.op) + '">' +
+             '<div class="head">' +
+               '<span class="date">' + Portal.escapeHtml(e.date) + "</span>" +
+               '<span class="op">' + Portal.escapeHtml(e.op) + "</span>" +
+               '<span class="subj">' + Portal.escapeHtml(e.subject) + "</span>" +
+             "</div>" +
+             '<div class="body expanded">' + renderBody(e.body || "") + "</div>" +
+             (linksHtml ? '<div style="margin-top:6px;font-size:11.5px;line-height:1.7">' + linksHtml + "</div>" : "") +
+           "</div>";
+  }).join("");
+  Portal.attachWikiHovercards(box, theIdx);
+}
+
+function renderBody(body) {
+  const lines = body.split("\n");
+  let html = "";
+  let inUl = false;
+  lines.forEach(function (l) {
+    const m = l.match(/^- (.+)$/);
+    if (m) {
+      if (!inUl) { html += "<ul>"; inUl = true; }
+      html += "<li>" + inlineMd(m[1]) + "</li>";
+    } else {
+      if (inUl) { html += "</ul>"; inUl = false; }
+      if (l.trim()) html += "<p>" + inlineMd(l) + "</p>";
+    }
+  });
+  if (inUl) html += "</ul>";
+  return html;
+}
+function inlineMd(s) {
+  let out = Portal.escapeHtml(s);
+  out = out.replace(/\[\[([A-Za-z0-9][A-Za-z0-9._\-\/]*)(?:\|([^\]]+))?\]\]/g, function (_m, slug, disp) {
+    const label = disp || slug;
+    const exists = theIdx._bySlug.hasOwnProperty(slug);
+    const cls = exists ? "wiki" : "wiki broken";
+    const href = exists ? "/html/portal/page.html?slug=" + encodeURIComponent(slug) : "#";
+    return '<a class="' + cls + '" data-slug="' + slug + '" href="' + href + '">' + Portal.escapeHtml(label) + "</a>";
+  });
+  out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
+  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  return out;
+}
+</script>
+</body>
+</html>

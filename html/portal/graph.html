@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Graph — Portal</title>
+<link rel="stylesheet" href="/html/portal/lib/portal.css" />
+</head>
+<body>
+<div class="shell">
+  <main class="main">
+    <div class="topstrip">
+      <div class="crumbs"><strong>Graph</strong> · wikilink structure</div>
+      <div class="meta">
+        <span id="count"></span>
+        <button class="open-cmd" id="reset-view">reset view</button>
+      </div>
+    </div>
+    <div class="graph-shell" id="gshell">
+      <aside class="controls-col">
+        <h4>Lens</h4>
+        <label><input type="radio" name="lens" value="default" checked>default (topic color)</label>
+        <label><input type="radio" name="lens" value="recency">recency (fade old)</label>
+        <label><input type="radio" name="lens" value="venue">venue cohorts</label>
+        <label><input type="radio" name="lens" value="degree">degree (size only)</label>
+
+        <h4>Show</h4>
+        <label><input type="checkbox" id="show-topic" checked>topic nodes</label>
+        <label><input type="checkbox" id="show-entity" checked>entity nodes</label>
+        <label><input type="checkbox" id="show-synthesis" checked>synthesis nodes</label>
+        <label><input type="checkbox" id="show-labels" checked>entity labels</label>
+
+        <h4>Topics</h4>
+        <div id="topic-chips"></div>
+        <button class="clear" id="clear-topics" style="margin-top:6px">clear filter</button>
+
+        <h4>Search</h4>
+        <input type="text" class="text" id="g-search" placeholder="title or slug…" style="width:100%;border:1px solid var(--rule-strong);background:var(--bg);padding:5px 8px;border-radius:4px;font:13px var(--font-sans);" />
+      </aside>
+      <div class="canvas-col" id="canvas-col">
+        <svg id="g-svg"></svg>
+        <div class="legend" id="legend">
+          <strong style="color:var(--ink)">legend</strong><br>
+          <span class="dot" style="background:var(--accent-deep)"></span> topic (hex)<br>
+          <span class="dot" style="background:var(--accent-paper)"></span> entity (circle)<br>
+          <span class="dot" style="background:var(--accent-final)"></span> synthesis (diamond)<br>
+          size = inbound citations
+        </div>
+      </div>
+      <aside class="detail-col" id="detail-col" style="display:none">
+        <button class="close" id="detail-close" aria-label="close">×</button>
+        <div id="detail-body"></div>
+      </aside>
+    </div>
+  </main>
+</div>
+<script src="/html/portal/lib/portal.js" defer></script>
+<script defer>
+// 14-color palette per topic (perceptually distinct, beige-compatible).
+const TOPIC_COLORS = [
+  "#3A6E5B", "#B0552A", "#3B5A8C", "#8A6CB6", "#C28E2F",
+  "#5B7D3C", "#A6453C", "#2B7A8A", "#9B4F8E", "#7E6A3F",
+  "#4D7C9C", "#9C7B2E", "#5E5E5E", "#85492A"
+];
+const ENT_DEFAULT = "#3B5A8C";
+const SYN_COLOR = "#B0552A";
+
+let G = null;          // { nodes, edges, byId, topicIds, topicColor, byTopic }
+let SIM = null;        // { nodes (with x,y,vx,vy), running, alpha }
+let lensState = "default";
+let activeTopics = new Set();
+let theIdx = null;
+let svg, edgesG, nodesG, viewport;
+let viewState = { tx: 0, ty: 0, scale: 1 };
+let selectedSlug = null;
+
+document.addEventListener("DOMContentLoaded", function () {
+  Portal.mountRail("graph");
+  Portal.loadIndex().then(function (idx) {
+    theIdx = idx;
+    buildModel(idx);
+    setupSvg();
+    layoutInit();
+    runSimulation();
+    bindControls();
+  });
+});
+
+function buildModel(idx) {
+  const graph = idx.graph || { nodes: [], edges: [] };
+  const byId = {};
+  graph.nodes.forEach(function (n) { byId[n.id] = n; });
+  // Topic ids in deterministic order.
+  const topicIds = graph.nodes.filter(function (n) { return n.type === "topic"; })
+                              .map(function (n) { return n.id; }).sort();
+  const topicColor = {};
+  topicIds.forEach(function (t, i) { topicColor[t] = TOPIC_COLORS[i % TOPIC_COLORS.length]; });
+  // Bucket entities + synthesis by their primary topic (first in `topics`).
+  const byTopic = {};
+  graph.nodes.forEach(function (n) {
+    if (n.type === "topic") return;
+    const t = (n.topics && n.topics[0]) || null;
+    if (!t) return;
+    (byTopic[t] = byTopic[t] || []).push(n.id);
+  });
+  G = {
+    nodes: graph.nodes,
+    edges: graph.edges,
+    byId: byId,
+    topicIds: topicIds,
+    topicColor: topicColor,
+    byTopic: byTopic,
+  };
+  document.getElementById("count").textContent = graph.nodes.length + " nodes · " + graph.edges.length + " edges";
+
+  // topic chips
+  const chipBox = document.getElementById("topic-chips");
+  chipBox.innerHTML = topicIds.map(function (t) {
+    return '<span class="topic-chip" data-t="' + t + '" style="border-color:' + topicColor[t] + ';color:' + topicColor[t] + '">' +
+           Portal.escapeHtml(t) + "</span>";
+  }).join("");
+  chipBox.querySelectorAll(".topic-chip").forEach(function (el) {
+    el.addEventListener("click", function () {
+      const t = el.dataset.t;
+      if (activeTopics.has(t)) { activeTopics.delete(t); el.classList.remove("active"); }
+      else { activeTopics.add(t); el.classList.add("active"); }
+      applyFilter();
+    });
+  });
+}
+
+function setupSvg() {
+  svg = document.getElementById("g-svg");
+  const col = document.getElementById("canvas-col");
+  const w = col.clientWidth || 1000;
+  const h = col.clientHeight || 700;
+  svg.setAttribute("viewBox", "0 0 " + w + " " + h);
+  svg.innerHTML = '<g id="viewport"><g id="edges"></g><g id="nodes"></g></g>';
+  viewport = document.getElementById("viewport");
+  edgesG = document.getElementById("edges");
+  nodesG = document.getElementById("nodes");
+
+  // pan + zoom
+  let dragging = false, lastX, lastY;
+  svg.addEventListener("mousedown", function (e) {
+    if (e.target.closest(".gn")) return; // node handles its own click
+    dragging = true; lastX = e.clientX; lastY = e.clientY;
+  });
+  window.addEventListener("mouseup", function () { dragging = false; });
+  window.addEventListener("mousemove", function (e) {
+    if (!dragging) return;
+    viewState.tx += (e.clientX - lastX);
+    viewState.ty += (e.clientY - lastY);
+    lastX = e.clientX; lastY = e.clientY;
+    applyViewTransform();
+  });
+  svg.addEventListener("wheel", function (e) {
+    e.preventDefault();
+    const pt = svgPoint(e.clientX, e.clientY);
+    const k = e.deltaY > 0 ? 0.92 : 1.08;
+    viewState.scale *= k;
+    viewState.scale = Math.max(0.25, Math.min(3.5, viewState.scale));
+    // Zoom-to-cursor
+    viewState.tx = pt.x - (pt.x - viewState.tx) * k;
+    viewState.ty = pt.y - (pt.y - viewState.ty) * k;
+    applyViewTransform();
+  }, { passive: false });
+  document.getElementById("reset-view").addEventListener("click", function () {
+    viewState = { tx: 0, ty: 0, scale: 1 };
+    applyViewTransform();
+    layoutInit();
+    runSimulation();
+  });
+
+  window.addEventListener("resize", function () {
+    const w2 = col.clientWidth, h2 = col.clientHeight;
+    svg.setAttribute("viewBox", "0 0 " + w2 + " " + h2);
+  });
+}
+
+function svgPoint(clientX, clientY) {
+  const r = svg.getBoundingClientRect();
+  const vb = svg.viewBox.baseVal;
+  const x = (clientX - r.left) * (vb.width / r.width);
+  const y = (clientY - r.top) * (vb.height / r.height);
+  return { x: x, y: y };
+}
+
+function applyViewTransform() {
+  viewport.setAttribute("transform",
+    "translate(" + viewState.tx + "," + viewState.ty + ") scale(" + viewState.scale + ")");
+}
+
+function layoutInit() {
+  // Pin topics on a circle around viewport center; scatter their children.
+  const vb = svg.viewBox.baseVal;
+  const cx = vb.width / 2, cy = vb.height / 2;
+  const R = Math.min(vb.width, vb.height) * 0.36;
+  SIM = { nodes: {}, running: false, alpha: 1.0 };
+  G.topicIds.forEach(function (t, i) {
+    const ang = (i / G.topicIds.length) * Math.PI * 2 - Math.PI / 2;
+    SIM.nodes[t] = {
+      id: t, x: cx + R * Math.cos(ang), y: cy + R * Math.sin(ang),
+      vx: 0, vy: 0, pinned: true, type: "topic"
+    };
+  });
+  G.nodes.forEach(function (n) {
+    if (n.type === "topic") return;
+    const home = (n.topics && n.topics[0]) || G.topicIds[0];
+    const homePos = SIM.nodes[home] || { x: cx, y: cy };
+    const jitter = 60 + Math.random() * 80;
+    const ang = Math.random() * Math.PI * 2;
+    SIM.nodes[n.id] = {
+      id: n.id, x: homePos.x + jitter * Math.cos(ang),
+      y: homePos.y + jitter * Math.sin(ang),
+      vx: 0, vy: 0, pinned: false, type: n.type,
+      home: home,
+    };
+  });
+}
+
+function runSimulation() {
+  if (SIM.running) return;
+  SIM.running = true;
+  SIM.alpha = 1.0;
+  // Pre-render nodes + edges once; sim updates positions on the existing DOM.
+  renderGraphDOM();
+  const step = function () {
+    if (!SIM.running) return;
+    forceStep();
+    syncPositions();
+    SIM.alpha *= 0.985;
+    if (SIM.alpha > 0.02) requestAnimationFrame(step);
+    else SIM.running = false;
+  };
+  requestAnimationFrame(step);
+}
+
+function forceStep() {
+  // Cheap O(n^2) repulsion is fine at ~125 nodes; bumps stable in ~60 frames.
+  const nodes = G.nodes;
+  const NODES = SIM.nodes;
+  const N = nodes.length;
+  const REP = 1100;       // node repulsion
+  const SPRING = 0.012;   // edge spring
+  const REST = 110;       // edge rest length
+  const HOME_PULL = 0.018; // pull entity toward its topic anchor
+  const DAMP = 0.85;
+  const a = SIM.alpha;
+
+  // Repulsion (n^2; 125 nodes ≈ 15.6k ops per frame, fine)
+  for (let i = 0; i < N; i++) {
+    const ni = NODES[nodes[i].id];
+    if (!ni) continue;
+    for (let j = i + 1; j < N; j++) {
+      const nj = NODES[nodes[j].id];
+      if (!nj) continue;
+      let dx = nj.x - ni.x, dy = nj.y - ni.y;
+      let d2 = dx*dx + dy*dy;
+      if (d2 < 1) { d2 = 1; dx = (Math.random()-0.5); dy = (Math.random()-0.5); }
+      const f = REP / d2 * a;
+      const d = Math.sqrt(d2);
+      const ux = dx / d, uy = dy / d;
+      const fx = f * ux, fy = f * uy;
+      if (!ni.pinned) { ni.vx -= fx; ni.vy -= fy; }
+      if (!nj.pinned) { nj.vx += fx; nj.vy += fy; }
+    }
+  }
+  // Spring on edges
+  for (let k = 0; k < G.edges.length; k++) {
+    const e = G.edges[k];
+    const ns = NODES[e.source], nt = NODES[e.target];
+    if (!ns || !nt) continue;
+    let dx = nt.x - ns.x, dy = nt.y - ns.y;
+    let d = Math.sqrt(dx*dx + dy*dy) || 1;
+    const f = SPRING * (d - REST) * a;
+    const ux = dx / d, uy = dy / d;
+    if (!ns.pinned) { ns.vx += f * ux; ns.vy += f * uy; }
+    if (!nt.pinned) { nt.vx -= f * ux; nt.vy -= f * uy; }
+  }
+  // Home pull for entities
+  for (let i = 0; i < N; i++) {
+    const ni = NODES[nodes[i].id];
+    if (!ni || ni.pinned || !ni.home) continue;
+    const home = NODES[ni.home];
+    if (!home) continue;
+    ni.vx += (home.x - ni.x) * HOME_PULL * a;
+    ni.vy += (home.y - ni.y) * HOME_PULL * a;
+  }
+  // Integrate
+  for (let i = 0; i < N; i++) {
+    const ni = NODES[nodes[i].id];
+    if (!ni || ni.pinned) continue;
+    ni.vx *= DAMP; ni.vy *= DAMP;
+    ni.x += ni.vx; ni.y += ni.vy;
+  }
+}
+
+function syncPositions() {
+  G.edges.forEach(function (e, i) {
+    const el = edgesG.children[i];
+    if (!el) return;
+    const ns = SIM.nodes[e.source], nt = SIM.nodes[e.target];
+    if (!ns || !nt) return;
+    el.setAttribute("x1", ns.x); el.setAttribute("y1", ns.y);
+    el.setAttribute("x2", nt.x); el.setAttribute("y2", nt.y);
+  });
+  G.nodes.forEach(function (n) {
+    const el = document.getElementById("n-" + cssId(n.id));
+    if (!el) return;
+    const p = SIM.nodes[n.id];
+    if (!p) return;
+    el.setAttribute("transform", "translate(" + p.x + "," + p.y + ")");
+  });
+}
+
+function cssId(s) { return s.replace(/[^A-Za-z0-9_\-]/g, "_"); }
+
+function renderGraphDOM() {
+  // Edges first.
+  let eHtml = "";
+  G.edges.forEach(function (e) {
+    const w = Math.min(2.5, 0.5 + (e.weight || 1) * 0.5);
+    eHtml += '<line class="ge" data-s="' + Portal.escapeAttr(e.source) +
+             '" data-t="' + Portal.escapeAttr(e.target) +
+             '" stroke-width="' + w + '" x1="0" y1="0" x2="0" y2="0"></line>';
+  });
+  edgesG.innerHTML = eHtml;
+
+  // Nodes.
+  let nHtml = "";
+  G.nodes.forEach(function (n) {
+    nHtml += renderNode(n);
+  });
+  nodesG.innerHTML = nHtml;
+
+  // Click handler delegation
+  nodesG.addEventListener("click", function (e) {
+    let t = e.target;
+    while (t && t !== this && !t.dataset.slug) t = t.parentNode;
+    if (t && t.dataset.slug) selectNode(t.dataset.slug);
+  });
+}
+
+function renderNode(n) {
+  const c = nodeColor(n);
+  const size = nodeSize(n);
+  const labelClass = n.type === "topic" ? "lbl topic" : "lbl";
+  const opacity = lensOpacity(n);
+  const labelText = (n.type === "topic" || (n.type === "synthesis"))
+    ? n.title.replace(/^Synthesis: */i, "")
+    : n.title;
+  const shape = n.type === "topic"
+    ? '<polygon points="' + hexPoints(size) + '" fill="' + c + '" stroke="#2A2925" stroke-width="1" opacity="' + opacity + '"></polygon>'
+    : n.type === "synthesis"
+      ? '<polygon points="' + diamondPoints(size) + '" fill="' + c + '" stroke="#2A2925" stroke-width="1" opacity="' + opacity + '"></polygon>'
+      : '<circle r="' + size + '" fill="' + c + '" stroke="#2A2925" stroke-width="0.5" opacity="' + opacity + '"></circle>';
+  const showLabel = n.type === "topic" || n.type === "synthesis"
+    || (n.degree_in >= 3);
+  const lbl = showLabel
+    ? '<text class="' + labelClass + '" y="' + (size + 11) + '" text-anchor="middle" opacity="' + opacity + '">' +
+      Portal.escapeHtml(_clip(labelText, 22)) + "</text>"
+    : "";
+  return '<g class="gn" id="n-' + cssId(n.id) + '" data-slug="' + Portal.escapeAttr(n.id) +
+         '" style="cursor:pointer">' + shape + lbl + "</g>";
+}
+
+function _clip(s, n) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+function hexPoints(r) {
+  const pts = [];
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2 + Math.PI / 6;
+    pts.push((r * Math.cos(a)).toFixed(1) + "," + (r * Math.sin(a)).toFixed(1));
+  }
+  return pts.join(" ");
+}
+function diamondPoints(r) {
+  return [[0,-r],[r,0],[0,r],[-r,0]].map(function (p) { return p[0]+","+p[1]; }).join(" ");
+}
+
+function nodeColor(n) {
+  if (n.type === "topic") return G.topicColor[n.id] || ENT_DEFAULT;
+  if (n.type === "synthesis") return SYN_COLOR;
+  // entity: color by primary topic
+  const t = (n.topics && n.topics[0]) || null;
+  if (t && G.topicColor[t]) return G.topicColor[t];
+  return ENT_DEFAULT;
+}
+
+function nodeSize(n) {
+  if (n.type === "topic") return 18;
+  if (n.type === "synthesis") return 11;
+  // Entity: 4..14 by inbound degree
+  const d = n.degree_in || 0;
+  return Math.min(14, 4 + d * 1.5);
+}
+
+function lensOpacity(n) {
+  if (lensState === "recency") {
+    if (!n.updated) return 0.4;
+    const days = (Date.now() - new Date(n.updated + "T00:00:00Z").getTime()) / 86400000;
+    if (days < 30) return 1;
+    if (days < 90) return 0.75;
+    if (days < 180) return 0.55;
+    return 0.35;
+  }
+  return 1;
+}
+
+function bindControls() {
+  document.querySelectorAll('input[name="lens"]').forEach(function (r) {
+    r.addEventListener("change", function () {
+      lensState = r.value;
+      renderGraphDOM();
+      runSimulation();
+      applyFilter();
+    });
+  });
+  ["show-topic", "show-entity", "show-synthesis", "show-labels"].forEach(function (id) {
+    document.getElementById(id).addEventListener("change", applyVisibility);
+  });
+  document.getElementById("clear-topics").addEventListener("click", function () {
+    activeTopics.clear();
+    document.querySelectorAll(".topic-chip.active").forEach(function (el) { el.classList.remove("active"); });
+    applyFilter();
+  });
+  document.getElementById("g-search").addEventListener("input", function (e) {
+    const q = e.target.value.toLowerCase().trim();
+    applySearch(q);
+  });
+  document.getElementById("detail-close").addEventListener("click", closeDetail);
+}
+
+function applyVisibility() {
+  const showT = document.getElementById("show-topic").checked;
+  const showE = document.getElementById("show-entity").checked;
+  const showS = document.getElementById("show-synthesis").checked;
+  const showLbl = document.getElementById("show-labels").checked;
+  G.nodes.forEach(function (n) {
+    const el = document.getElementById("n-" + cssId(n.id));
+    if (!el) return;
+    const visible = (n.type === "topic" && showT)
+                 || (n.type === "entity" && showE)
+                 || (n.type === "synthesis" && showS);
+    el.style.display = visible ? "" : "none";
+    const lbl = el.querySelector("text");
+    if (lbl && n.type === "entity") lbl.style.display = showLbl ? "" : "none";
+  });
+  G.edges.forEach(function (e, i) {
+    const el = edgesG.children[i];
+    if (!el) return;
+    const ns = G.byId[e.source], nt = G.byId[e.target];
+    const sv = (ns.type === "topic" && showT)
+            || (ns.type === "entity" && showE)
+            || (ns.type === "synthesis" && showS);
+    const tv = (nt.type === "topic" && showT)
+            || (nt.type === "entity" && showE)
+            || (nt.type === "synthesis" && showS);
+    el.style.display = (sv && tv) ? "" : "none";
+  });
+}
+
+function applyFilter() {
+  if (activeTopics.size === 0) {
+    G.nodes.forEach(function (n) {
+      const el = document.getElementById("n-" + cssId(n.id));
+      if (el) el.classList.remove("faded");
+    });
+    G.edges.forEach(function (_e, i) {
+      const el = edgesG.children[i];
+      if (el) el.classList.remove("faded");
+    });
+    return;
+  }
+  const keep = new Set();
+  G.nodes.forEach(function (n) {
+    if (n.type === "topic" && activeTopics.has(n.id)) keep.add(n.id);
+    else if (n.type !== "topic" && (n.topics || []).some(function (t) { return activeTopics.has(t); })) keep.add(n.id);
+  });
+  G.nodes.forEach(function (n) {
+    const el = document.getElementById("n-" + cssId(n.id));
+    if (!el) return;
+    if (keep.has(n.id)) el.classList.remove("faded");
+    else el.classList.add("faded");
+  });
+  G.edges.forEach(function (e, i) {
+    const el = edgesG.children[i];
+    if (!el) return;
+    if (keep.has(e.source) && keep.has(e.target)) el.classList.remove("faded");
+    else el.classList.add("faded");
+  });
+}
+
+function applySearch(q) {
+  if (!q) { G.nodes.forEach(function (n) {
+    const el = document.getElementById("n-" + cssId(n.id));
+    if (el) { el.classList.remove("faded"); el.classList.remove("hl"); }
+  });
+  G.edges.forEach(function (_e, i) {
+    const el = edgesG.children[i];
+    if (el) el.classList.remove("faded");
+  });
+  return; }
+  G.nodes.forEach(function (n) {
+    const el = document.getElementById("n-" + cssId(n.id));
+    if (!el) return;
+    const hit = (n.id + " " + (n.title || "") + " " + (n.venue || "")).toLowerCase().indexOf(q) !== -1;
+    if (hit) { el.classList.remove("faded"); el.classList.add("hl"); }
+    else { el.classList.add("faded"); el.classList.remove("hl"); }
+  });
+  G.edges.forEach(function (_e, i) {
+    const el = edgesG.children[i];
+    if (el) el.classList.add("faded");
+  });
+}
+
+function selectNode(slug) {
+  selectedSlug = slug;
+  // Highlight 1-hop neighborhood.
+  const neighbors = new Set([slug]);
+  G.edges.forEach(function (e) {
+    if (e.source === slug) neighbors.add(e.target);
+    if (e.target === slug) neighbors.add(e.source);
+  });
+  G.nodes.forEach(function (n) {
+    const el = document.getElementById("n-" + cssId(n.id));
+    if (!el) return;
+    if (neighbors.has(n.id)) { el.classList.remove("faded"); el.classList.toggle("hl", n.id === slug); }
+    else el.classList.add("faded");
+  });
+  G.edges.forEach(function (e, i) {
+    const el = edgesG.children[i];
+    if (!el) return;
+    if (e.source === slug || e.target === slug) el.classList.remove("faded");
+    else el.classList.add("faded");
+  });
+  openDetail(slug);
+}
+
+function openDetail(slug) {
+  document.getElementById("gshell").classList.add("detail-open");
+  const col = document.getElementById("detail-col");
+  col.style.display = "block";
+  const n = G.byId[slug];
+  const page = theIdx._bySlug[slug];
+  if (!n || !page) { col.innerHTML = '<button class="close" id="detail-close" aria-label="close">×</button><p>not found: ' + slug + "</p>"; return; }
+  const meta = [
+    page.frontmatter && page.frontmatter.venue,
+    page.frontmatter && page.frontmatter.track,
+    page.type
+  ].filter(Boolean).join(" · ");
+
+  // Neighbors breakdown
+  const cites = G.edges.filter(function (e) { return e.source === slug; }).map(function (e) { return e.target; });
+  const citedBy = G.edges.filter(function (e) { return e.target === slug; }).map(function (e) { return e.source; });
+  const bl = (theIdx.backlinks || {})[slug] || [];
+
+  let html = '<button class="close" id="detail-close" aria-label="close">×</button>';
+  html += '<h2>' + Portal.escapeHtml(page.title || slug) + "</h2>";
+  html += '<div class="meta">' + Portal.escapeHtml(meta) + "</div>";
+  if (page.tldr) html += '<div class="tldr">' + Portal.escapeHtml(page.tldr) + "</div>";
+
+  if (citedBy.length) {
+    html += "<h3>Cited by · " + citedBy.length + "</h3><ul>";
+    citedBy.slice(0, 12).forEach(function (sl) {
+      html += '<li><a href="#" data-jump="' + Portal.escapeAttr(sl) + '">' + Portal.escapeHtml(sl) + "</a></li>";
+    });
+    html += "</ul>";
+  }
+  if (cites.length) {
+    html += "<h3>Cites · " + cites.length + "</h3><ul>";
+    cites.slice(0, 12).forEach(function (sl) {
+      html += '<li><a href="#" data-jump="' + Portal.escapeAttr(sl) + '">' + Portal.escapeHtml(sl) + "</a></li>";
+    });
+    html += "</ul>";
+  }
+  html += '<a class="open-page" href="/html/portal/page.html?slug=' + encodeURIComponent(slug) + '">Open full page →</a>';
+
+  col.innerHTML = html;
+  document.getElementById("detail-close").addEventListener("click", closeDetail);
+  col.querySelectorAll("a[data-jump]").forEach(function (a) {
+    a.addEventListener("click", function (e) {
+      e.preventDefault();
+      selectNode(a.dataset.jump);
+    });
+  });
+}
+
+function closeDetail() {
+  document.getElementById("gshell").classList.remove("detail-open");
+  document.getElementById("detail-col").style.display = "none";
+  selectedSlug = null;
+  G.nodes.forEach(function (n) {
+    const el = document.getElementById("n-" + cssId(n.id));
+    if (el) { el.classList.remove("faded"); el.classList.remove("hl"); }
+  });
+  G.edges.forEach(function (_e, i) {
+    const el = edgesG.children[i];
+    if (el) el.classList.remove("faded");
+  });
+  applyFilter();
+}
+</script>
+</body>
+</html>

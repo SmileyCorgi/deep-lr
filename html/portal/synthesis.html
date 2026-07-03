@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Synthesis — Portal</title>
+<link rel="stylesheet" href="/html/portal/lib/portal.css" />
+</head>
+<body>
+<div class="shell">
+  <main class="main">
+    <div class="topstrip">
+      <div class="crumbs"><strong>Synthesis</strong></div>
+      <div class="meta"><span id="count"></span></div>
+    </div>
+    <div class="list-shell">
+      <h1>Synthesis</h1>
+      <div class="sublede">Cross-cluster essays, deep dives, and position pieces that integrate findings across topics.</div>
+      <div id="cards"></div>
+    </div>
+  </main>
+</div>
+<script src="/html/portal/lib/portal.js" defer></script>
+<script defer>
+document.addEventListener("DOMContentLoaded", function () {
+  Portal.mountRail("synthesis");
+  Portal.loadIndex().then(function (idx) {
+    const syns = (idx.pages || []).filter(function (p) { return p.type === "synthesis"; });
+    syns.sort(function (a, b) { return (b.updated || "").localeCompare(a.updated || ""); });
+    document.getElementById("count").textContent = syns.length + " syntheses";
+    const html = syns.map(function (p) {
+      const tags = (p.tags || []).map(function (t) {
+        return '<span class="badge">' + Portal.escapeHtml(t) + "</span>";
+      }).join(" ");
+      const cited = ((idx.backlinks || {})[p.slug] || []).length;
+      const outT = (p.out_links || []).filter(function (s) {
+        return idx._bySlug[s] && idx._bySlug[s].type === "topic";
+      });
+      const outE = (p.out_links || []).filter(function (s) {
+        return idx._bySlug[s] && idx._bySlug[s].type === "entity";
+      });
+      return '<a href="/html/portal/page.html?slug=' + encodeURIComponent(p.slug) +
+             '" style="display:block;padding:20px 22px;border:1px solid var(--rule);border-radius:6px;background:var(--bg);margin-bottom:14px;color:var(--ink);text-decoration:none">' +
+              '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:8px">' +
+                '<div style="font-weight:700;font-size:16px;letter-spacing:-0.01em">' + Portal.escapeHtml(p.title || p.slug) + "</div>" +
+                '<div style="color:var(--muted);font-size:12px;white-space:nowrap">' + Portal.escapeHtml(p.updated) + "</div>" +
+              "</div>" +
+              '<div style="font-size:13.5px;color:var(--ink-2);line-height:1.6;margin-bottom:10px">' + Portal.escapeHtml(p.tldr || "") + "</div>" +
+              '<div style="font-size:11.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap">' +
+                "<span>" + outT.length + " topics covered</span>" +
+                "<span>" + outE.length + " anchors cited</span>" +
+                "<span>" + cited + " inbound links</span>" +
+              "</div>" +
+              (tags ? '<div style="margin-top:10px">' + tags + "</div>" : "") +
+           "</a>";
+    }).join("");
+    document.getElementById("cards").innerHTML = html;
+  });
+});
+</script>
+</body>
+</html>

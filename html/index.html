@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>deep-lr</title>
+<meta name="description" content="deep-lr — literature research & knowledge management." />
+<link rel="stylesheet" href="/html/lib/style.css" />
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <div class="site-row">
+      <div>
+        <a href="/html/index.html" class="site-title">deep-lr</a>
+        <div class="site-tagline">literature research, organized</div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<nav class="controls" aria-label="Filter and sort">
+  <div class="wrap controls-inner">
+    <div class="chips" role="group" aria-label="Category filter" id="chips">
+      <!-- chips rendered by blog.js once categories.json loads -->
+    </div>
+    <div class="sort" id="sort">
+      <span class="label">sort:</span>
+      <button data-sort="desc" class="is-active" type="button">newest &darr;</button>
+      <span class="sep">&#124;</span>
+      <button data-sort="asc" type="button">oldest &uarr;</button>
+    </div>
+  </div>
+</nav>
+
+<main class="wrap">
+  <div class="rows" id="post-list"></div>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <span><span id="footer-count">0</span> posts<span id="footer-updated"></span></span>
+    <span><a href="/blog/index.json">index.json</a></span>
+  </div>
+</footer>
+
+<script src="/html/lib/blog.js" defer></script>
+</body>
+</html>

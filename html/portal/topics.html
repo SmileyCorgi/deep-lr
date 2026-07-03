@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Topics — Portal</title>
+<link rel="stylesheet" href="/html/portal/lib/portal.css" />
+</head>
+<body>
+<div class="shell">
+  <main class="main">
+    <div class="topstrip">
+      <div class="crumbs"><strong>Topics</strong></div>
+      <div class="meta"><span id="count"></span></div>
+    </div>
+    <div class="list-shell">
+      <h1>Topics</h1>
+      <div class="sublede" id="sublede">Top-level synthesis pages — entry points to clusters of the corpus.</div>
+      <div class="filterbar">
+        <input type="text" class="text" id="filter" placeholder="filter by name or tag…" />
+        <button class="clear" id="clear">clear</button>
+      </div>
+      <table class="list-table" id="tbl">
+        <thead><tr>
+          <th data-sort="slug">slug</th>
+          <th data-sort="title">title</th>
+          <th data-sort="sources" class="right">papers</th>
+          <th data-sort="cited" class="right">cited</th>
+          <th data-sort="updated">updated</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </main>
+</div>
+<script src="/html/portal/lib/portal.js" defer></script>
+<script defer>
+let rows = [];
+let sortKey = "sources", sortDesc = true;
+
+document.addEventListener("DOMContentLoaded", function () {
+  Portal.mountRail("topics");
+  Portal.loadIndex().then(function (idx) {
+    const topics = (idx.pages || []).filter(function (p) { return p.type === "topic"; });
+    rows = topics.map(function (p) {
+      const sources = (p.frontmatter && p.frontmatter.sources) || "";
+      const sNum = typeof sources === "string" ? parseInt(sources.match(/^\d+/), 10) : NaN;
+      const cited = ((idx.backlinks || {})[p.slug] || []).length;
+      return {
+        slug: p.slug,
+        title: p.title || p.slug,
+        tldr: p.curated_summary || p.tldr || "",
+        sources: isNaN(sNum) ? 0 : sNum,
+        cited: cited,
+        updated: p.updated || "",
+        tags: (p.tags || []).join(" "),
+      };
+    });
+    render();
+  });
+
+  document.getElementById("filter").addEventListener("input", render);
+  document.getElementById("clear").addEventListener("click", function () {
+    document.getElementById("filter").value = ""; render();
+  });
+  document.querySelectorAll("#tbl th[data-sort]").forEach(function (th) {
+    th.addEventListener("click", function () {
+      const k = th.dataset.sort;
+      if (sortKey === k) sortDesc = !sortDesc;
+      else { sortKey = k; sortDesc = (k === "sources" || k === "cited" || k === "updated"); }
+      render();
+    });
+  });
+});
+
+function render() {
+  const q = (document.getElementById("filter").value || "").toLowerCase().trim();
+  let filtered = rows.filter(function (r) {
+    if (!q) return true;
+    return (r.slug + " " + r.title + " " + r.tags + " " + r.tldr).toLowerCase().indexOf(q) !== -1;
+  });
+  filtered.sort(function (a, b) {
+    const av = a[sortKey], bv = b[sortKey];
+    if (typeof av === "number") return sortDesc ? bv - av : av - bv;
+    return sortDesc ? String(bv).localeCompare(String(av)) : String(av).localeCompare(String(bv));
+  });
+  document.getElementById("count").textContent = filtered.length + " topics";
+  document.querySelector("#tbl tbody").innerHTML = filtered.map(function (r) {
+    return '<tr>' +
+      '<td><a href="/html/portal/page.html?slug=' + encodeURIComponent(r.slug) + '"><code>' + Portal.escapeHtml(r.slug) + "</code></a></td>" +
+      '<td class="title"><a href="/html/portal/page.html?slug=' + encodeURIComponent(r.slug) + '">' + Portal.escapeHtml(r.title) + "</a>" +
+        '<span class="tldr">' + Portal.escapeHtml(r.tldr) + "</span></td>" +
+      '<td class="right dim">' + (r.sources || "—") + "</td>" +
+      '<td class="right dim">' + r.cited + "</td>" +
+      '<td class="dim">' + Portal.escapeHtml(r.updated) + "</td>" +
+    "</tr>";
+  }).join("");
+}
+</script>
+</body>
+</html>
