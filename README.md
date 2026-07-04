@@ -27,20 +27,35 @@ Obsidian works as the reading UI (optional: Dataview + Templater plugins).
 
 ## Quickstart
 
+**The minimal first day** (works even if your research direction isn't settled):
+
 1. Copy this repo (or `git clone`) to a new project folder.
 2. Open it in Claude Code and say:
    > Bootstrap this repo for **<your discipline>** research.
    The agent runs the `CLAUDE.md` §0 protocol: interviews you, fills the
-   config, creates seed topic pages.
-3. Start working:
-   - "Collect all papers on X from venues Y" → `lit-harvest`
-   - "Add this paper" → ingest flow
-   - "What's the state of X?" → query flow (answers file back into the wiki)
-   - "Go deep on X" → `deep-dive`
-   - "What's new this month?" → `paper-sweep`
-4. Browse: `python3 -m http.server 8765` from the repo root →
+   config, creates seed topic pages. Direction undecided? Say so — the agent
+   runs `good-question` first and bootstraps thin (1–2 tentative topics;
+   topics are cheap to rename/delete later).
+3. Hand it the 2–3 papers you already have: "Add this paper" (ingest flow).
+   That's a complete, useful first day — corpus harvests and deep dives earn
+   their complexity later.
+4. Browse: `python serve.py` from the repo root →
    portal at `http://127.0.0.1:8765/html/portal/index.html`
-   (regenerate with `python3 portal/build.py` after wiki changes).
+   (regenerate with `python portal/build.py` after wiki changes).
+   Every wiki page and blog post has a **✎ notes** widget — margin notes you
+   write in the browser land in `raw/notes/web/` and the agent integrates
+   them next session. (Plain `python -m http.server 8765` also works; notes
+   then stay in the browser with an export button.)
+
+**Growing from there:**
+   - "Build me a reading list on X (~30–50 papers)" → small `lit-harvest`
+   - "Collect all papers on X from venues Y" → full `lit-harvest`
+   - "What's the state of X?" → query flow (answers file back into the wiki)
+   - "Go deep on X" → `deep-dive` (with an adversarial reviewer gate)
+   - "What's new this month?" → `paper-sweep`
+   - "Is this a good research idea?" → `good-question` + the idea lifecycle
+     (capture → shape → promote to experiment)
+   - Made a mess? Every operation is one commit — `git revert` and move on.
 
 ## Design principles
 
@@ -56,11 +71,31 @@ Obsidian works as the reading UI (optional: Dataview + Templater plugins).
   recoverable from URLs; retired working files go to `archive/` with a README.
 - **Occam's Razor**: fewer pages, fewer folders; a page must earn its keep.
 
+## Template vs. content
+
+A working copy of this repo holds two things with different lifecycles: the
+**framework** (scripts, portal, skills, templates — keeps improving) and your
+**research content** (wiki, raw sources, posts — private by default). They
+stay separable by design:
+
+- Name the framework's GitHub remote `template` (not `origin`).
+- Publish framework improvements with `python scripts/template_sync.py --push`
+  — it copies only template-zone paths into a worktree of `template/main`,
+  resets the four bootstrap-mixed files from `meta/template-state/`, validates
+  (tests + builds + strict lint), and refuses to commit if any content path
+  sneaks in. Research content structurally cannot reach the template repo.
+- Pull framework updates the ordinary way: `git fetch template && git merge
+  template/main` (content files never conflict — they're not in the template).
+
 ## Adapting to your discipline
 
 - **Sources**: `scripts/harvest/download.py` ships adapters for arXiv,
-  OpenReview, and the ACL Anthology; add one function for PubMed/SSRN/bioRxiv
-  etc. and wire it into `get_abstract()` (see `scripts/harvest/README.md`).
+  OpenReview, the ACL Anthology, and CVF Open Access (CVPR/ICCV/WACV); add one
+  function for PubMed/SSRN/bioRxiv etc. and wire it into `get_abstract()`
+  (see `scripts/harvest/README.md`).
+- **Visual disciplines**: anchors' key figures are extracted to `raw/assets/`
+  before any PDF cleanup, and benchmark pages (`type: benchmark`) track SOTA
+  tables append-only over time.
 - **Templates**: page skeletons in `meta/templates/`.
 - **Branding**: site title strings live in `html/index.html`, `html/post.html`,
   and `html/portal/*.html` ("deep-lr" by default).

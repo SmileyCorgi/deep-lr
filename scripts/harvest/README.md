@@ -9,32 +9,52 @@ ACL/EMNLP/ICLR/ICML/NeurIPS 2025–2026.
 ```
 1. COLLECT   LLM agents (or scripts) enumerate accepted papers per venue-year
              → one TSV per venue-year in wiki/topics/<corpus>/collection/
-2. DEDUP     python3 scripts/harvest/dedup.py --corpus <name>
+2. DEDUP     python scripts/harvest/dedup.py --corpus <name> [--dry-run]
              → merges venue TSVs into wiki/topics/<corpus>/manifest.tsv
-3. DOWNLOAD  python3 scripts/harvest/download.py --corpus <name> --pilot 20
+3. DOWNLOAD  python scripts/harvest/download.py --corpus <name> --pilot 20
              → validate; then run without --pilot for the full corpus
-4. VERIFY    python3 scripts/harvest/verify.py --corpus <name>
-             → manifest ↔ filesystem cross-check, writes verification.md
+4. VERIFY    python scripts/harvest/verify.py --corpus <name> [--fix]
+             → manifest ↔ filesystem cross-check, writes verification.md;
+               --fix reconciles `downloaded` flags with disk truth
 ```
+
+(Windows note: use `python` or `py -3`; bare `python3` is often a Microsoft
+Store stub. All scripts are stdlib-only, Python ≥3.9.)
 
 Files land in `raw/papers/<corpus>/<VENUE>_<YEAR>/<slug>.{pdf,abstract.md}`.
 
-## Manifest schema (TSV, tab-separated, 15 columns)
+## Manifest schema (TSV, tab-separated, 17 columns, schema v2)
 
 | column | meaning |
 |---|---|
-| `id` | `<VENUE>_<YEAR>_NNN`, assigned by dedup.py |
+| `id` | `<VENUE>_<YEAR>_NNN`, assigned by dedup.py; stable across re-runs |
 | `title`, `authors` | authors as `Last, First; Last, First; …` |
 | `venue`, `year`, `track` | track ∈ oral/spotlight/main/poster/findings/… |
 | `category` | your topical tag (used for tiered digestion later) |
-| `arxiv_id`, `openreview_id`, `anthology_id` | source ids — fill what you have |
+| `arxiv_id`, `openreview_id`, `anthology_id`, `doi` | source ids — fill what you have |
 | `pdf_url`, `abstract_url` | canonical URLs |
+| `code_url` | official code / weights repo, if any (grab it during COLLECT) |
 | `slug` | filename stem, lowercase-hyphenated |
-| `downloaded` | `yes` / `no` / empty — maintained by download.py only |
+| `downloaded` | `yes` / `no` / empty — maintained by download.py / `verify.py --fix` only |
 | `notes` | free text; dedup.py appends cross-venue acceptances here |
 
-**The manifest is canon.** Never hand-edit `downloaded`; let download.py or a
-reconcile pass fix it. Never delete rows — corrections go in `notes`.
+v1 manifests (15 columns, no `doi`/`code_url`) are upgraded automatically on
+the next read. All manifest I/O goes through `manifestio.py` — the single
+source of truth for schema, UTF-8 encoding, the escape dialect, and atomic
+writes. Scripts must never `open()` the manifest directly.
+
+**The manifest is canon.** Never hand-edit `downloaded`; let download.py or
+`verify.py --fix` reconcile it. Never delete rows — corrections go in `notes`.
+Re-running dedup.py is safe: rows keep their `id`/`downloaded`/`notes` as long
+as they still resolve to the same (venue, year, slug), and new ids continue
+each venue-year sequence.
+
+## Tests
+
+`python -m unittest discover scripts/harvest/tests -v` — covers title/author
+normalization, all three dedup signals, archival-first canonical selection,
+re-run carry-over, and the TSV round-trip with hostile characters (tabs,
+backslashes, non-ASCII). Run after touching any harvest script.
 
 ## Operating doctrine (lessons that cost real time)
 
@@ -55,11 +75,15 @@ reconcile pass fix it. Never delete rows — corrections go in `notes`.
 - **OpenReview API v2**: filter with `content.venue=<string>`, *not*
   `content.venueid`. Values are wrapped: `{"value": ...}`.
 - **arXiv**: hard rate limit ~1 request / 3 s on both `export.arxiv.org` API
-  and PDF fetches; 429s are common — the downloader backs off 8/20/45 s.
-  Include a contact email in your User-Agent (set `CONTACT_EMAIL` in
-  download.py).
+  and PDF fetches; 429s are common — the downloader backs off 8/20/45 s and
+  honors `Retry-After`. Include a contact email in your User-Agent (set
+  `CONTACT_EMAIL` in download.py or export `DEEPLR_CONTACT_EMAIL`).
 - **ACL Anthology**: event pages (`aclanthology.org/events/<venue>-<year>/`)
   are the complete accepted list; abstracts are in `div.acl-abstract`.
+- **CVF Open Access** (openaccess.thecvf.com) — CVPR/ICCV/WACV archival home:
+  `openaccess.thecvf.com/CVPR<year>?day=all` lists every accepted paper, each
+  with an HTML abstract page (`div#abstract`) and a direct PDF link. No harsh
+  rate limits observed; the downloader still spaces requests 1 s apart.
 - **Conference virtual sites** (icml.cc, neurips.cc, iclr.cc `/virtual/`):
   abstracts in `div.abstract-text-inner`; PDFs usually absent until the
   OpenReview archive opens (~conference time).

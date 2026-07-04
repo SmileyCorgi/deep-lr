@@ -3,15 +3,18 @@
 Smart downloader for a deep-lr literature corpus.
 
 Reads wiki/topics/<corpus>/manifest.tsv. For each row with downloaded in {"no", ""}:
-  - Fetches the abstract (source adapters: ACL Anthology HTML, OpenReview API,
-    arXiv API, generic conference "virtual site" HTML).
+  - Fetches the abstract (source adapters: ACL Anthology HTML, CVF Open Access
+    HTML, OpenReview API, arXiv API, generic conference "virtual site" HTML).
   - Downloads the PDF (canonical pdf_url with arXiv fallback, then arXiv title search).
   - Writes raw/papers/<corpus>/<venue>_<year>/<slug>.{pdf,abstract.md}.
   - Updates manifest.tsv `downloaded` column to "yes" on success.
   - Logs failures with diagnosis to wiki/topics/<corpus>/collection/download-errors.log.
 
-Resume-safe: skips rows whose target files already exist on disk.
-Polite: per-host minimum intervals + exponential backoff on 429/503.
+Resume-safe: skips rows whose target files already exist on disk AND pass the
+PDF integrity check (%PDF header + %%EOF trailer — truncated files re-fetch).
+Polite: per-host minimum intervals + exponential backoff on 429/503 honoring
+Retry-After. The manifest is checkpointed atomically every 25 rows, so a
+mid-run crash loses at most 25 rows of bookkeeping and can never truncate it.
 
 Usage:
   download.py --corpus <name>                     # full run on all queued rows
@@ -24,28 +27,27 @@ Doctrine (learned the hard way — see scripts/harvest/README.md):
     Agents are poor at sitting through HTTP 429 backoffs.
   - Always pilot (--pilot 20) before a full run.
   - The manifest is canon: never hand-edit downloaded flags; let this script or
-    verify.py reconcile them.
+    `verify.py --fix` reconcile them.
 
 Extending to a new discipline: add an abstract extractor for your source
 (PubMed, SSRN, bioRxiv, ...) and wire it into get_abstract(). Everything else
 (rate limiting, retries, sidecars, manifest bookkeeping) is source-agnostic.
 """
 from __future__ import annotations
-import argparse, csv, json, random, re, sys, time, urllib.parse, urllib.request
+import argparse, json, os, random, re, socket, sys, time, urllib.parse, urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
 from collections import defaultdict
 from urllib.error import HTTPError, URLError
 
+from manifestio import read_rows, write_rows, pdf_ok
+
 # scripts/harvest/download.py → repo root is two levels up.
 ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Set to a real contact address — polite crawling etiquette (arXiv asks for it).
-CONTACT_EMAIL = "you@example.com"
-
-HEADERS = ["id","title","authors","venue","year","track","category","arxiv_id",
-           "openreview_id","anthology_id","pdf_url","abstract_url","slug",
-           "downloaded","notes"]
+# Either edit here or export DEEPLR_CONTACT_EMAIL.
+CONTACT_EMAIL = os.environ.get("DEEPLR_CONTACT_EMAIL", "you@example.com")
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       f"(KHTML, like Gecko) AcademicResearchBot/1.0 (mailto:{CONTACT_EMAIL})")
@@ -53,17 +55,22 @@ last_request_at: dict[str, float] = defaultdict(float)
 
 # Per-host minimum interval. OpenReview and arXiv enforce strict rate limits.
 HOST_INTERVAL = {
-    "api2.openreview.net":   2.5,
-    "openreview.net":        2.5,
-    "export.arxiv.org":      3.0,   # arXiv asks for max ~1 req / 3s
-    "arxiv.org":             3.0,
-    "aclanthology.org":      0.5,
+    "api2.openreview.net":      2.5,
+    "openreview.net":           2.5,
+    "export.arxiv.org":         3.0,   # arXiv asks for max ~1 req / 3s
+    "arxiv.org":                3.0,
+    "aclanthology.org":         0.5,
+    "openaccess.thecvf.com":    1.0,
 }
 DEFAULT_INTERVAL = 1.0
 
-# Retry policy for 429 (Too Many Requests) and 503 (Service Unavailable).
+# Retryable failures: rate limiting, transient server errors, network blips.
 RETRY_CODES = {"HTTP 429", "HTTP 503", "timeout"}
 BACKOFFS = [8, 20, 45]   # seconds between attempts
+MAX_RETRY_AFTER = 120    # cap on server-requested Retry-After
+
+def retryable(err: str) -> bool:
+    return err in RETRY_CODES or err.startswith("transient:")
 
 def polite_wait(url: str):
     host = urllib.parse.urlparse(url).netloc
@@ -73,44 +80,58 @@ def polite_wait(url: str):
         time.sleep(interval - elapsed)
     last_request_at[host] = time.monotonic()
 
-def fetch_once(url: str, timeout: int, accept: str) -> tuple[bytes | None, str | None]:
+def fetch_once(url: str, timeout: int, accept: str) -> tuple[bytes | None, str | None, str | None]:
+    """Returns (body, error, retry_after_header)."""
     polite_wait(url)
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": accept})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read(), None
+            return r.read(), None, None
     except HTTPError as e:
-        return None, f"HTTP {e.code}"
+        ra = e.headers.get("Retry-After") if e.headers else None
+        return None, f"HTTP {e.code}", ra
     except URLError as e:
-        msg = str(e.reason)
-        return None, ("timeout" if "timed out" in msg.lower() else f"URLError: {msg}")
+        reason = e.reason
+        if isinstance(reason, (socket.timeout, TimeoutError)):
+            return None, "timeout", None
+        if isinstance(reason, (ConnectionResetError, ConnectionAbortedError,
+                               ConnectionRefusedError, socket.gaierror)):
+            return None, f"transient: {type(reason).__name__}", None
+        msg = str(reason)
+        return None, ("timeout" if "timed out" in msg.lower() else f"URLError: {msg}"), None
     except TimeoutError:
-        return None, "timeout"
+        return None, "timeout", None
     except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+        return None, f"{type(e).__name__}: {e}", None
 
 def fetch(url: str, timeout: int = 30, accept: str = "*/*") -> tuple[bytes | None, str | None]:
-    """Fetch with retry-on-429 (exponential backoff)."""
-    body, err = fetch_once(url, timeout, accept)
+    """Fetch with retry on 429/503/timeout/connection blips, honoring Retry-After."""
+    body, err, ra = fetch_once(url, timeout, accept)
     if err is None: return body, None
     for delay in BACKOFFS:
-        if err not in RETRY_CODES: break
+        if not retryable(err): break
+        if ra:
+            try:
+                delay = max(delay, min(int(float(ra)), MAX_RETRY_AFTER))
+            except ValueError:
+                pass
         time.sleep(delay)
-        body, err = fetch_once(url, timeout, accept)
+        body, err, ra = fetch_once(url, timeout, accept)
         if err is None: return body, None
     return None, err
 
 # ---------- Abstract extractors (source adapters) ----------
 
-class DivClassAbstractParser(HTMLParser):
-    """Extract text content of the first <div class="...NEEDLE..."> subtree."""
-    def __init__(self, needle: str):
+class DivAttrParser(HTMLParser):
+    """Extract text content of the first <div> whose `attr` contains NEEDLE."""
+    def __init__(self, needle: str, attr: str = "class"):
         super().__init__()
         self.needle = needle
+        self.attr = attr
         self.depth = 0; self.inside = False; self.buf: list[str] = []
     def handle_starttag(self, tag, attrs):
         d = dict(attrs)
-        if tag == "div" and self.needle in (d.get("class","")) and not self.inside:
+        if tag == "div" and self.needle in (d.get(self.attr, "") or "") and not self.inside:
             self.inside = True; self.depth = 1
         elif self.inside:
             self.depth += 1
@@ -123,10 +144,10 @@ class DivClassAbstractParser(HTMLParser):
         if self.inside:
             self.buf.append(data)
 
-def _extract_div(url: str, needle: str) -> tuple[str | None, str | None]:
+def _extract_div(url: str, needle: str, attr: str = "class") -> tuple[str | None, str | None]:
     html, err = fetch(url)
     if err: return None, err
-    p = DivClassAbstractParser(needle)
+    p = DivAttrParser(needle, attr)
     try: p.feed(html.decode("utf-8", errors="replace"))
     except Exception as e: return None, f"parse failed: {e}"
     text = re.sub(r"\s+", " ", "".join(p.buf)).strip()
@@ -137,6 +158,13 @@ def abstract_from_anthology(row: dict) -> tuple[str | None, str | None]:
     url = row["abstract_url"]
     if not url: return None, "no abstract_url"
     return _extract_div(url, "acl-abstract")
+
+def abstract_from_cvf(row: dict) -> tuple[str | None, str | None]:
+    """CVF Open Access (openaccess.thecvf.com) paper pages — the archival home
+    of CVPR/ICCV/WACV. Abstract lives in <div id="abstract">."""
+    url = row["abstract_url"]
+    if not url: return None, "no abstract_url"
+    return _extract_div(url, "abstract", attr="id")
 
 def abstract_from_openreview(row: dict) -> tuple[str | None, str | None]:
     fid = row["openreview_id"]
@@ -176,6 +204,8 @@ def get_abstract(row: dict) -> tuple[str | None, str | None]:
     """Adapter dispatch, most-reliable source first. Add new disciplines here."""
     if row["anthology_id"] and row["abstract_url"]:
         return abstract_from_anthology(row)
+    if "thecvf.com" in (row["abstract_url"] or ""):
+        return abstract_from_cvf(row)
     if row["openreview_id"]:
         return abstract_from_openreview(row)
     if row["arxiv_id"]:
@@ -219,6 +249,7 @@ def download_pdf(url: str, dest: Path) -> tuple[bool, str]:
     if err: return False, err
     if not body or len(body) < 1024: return False, f"too small ({len(body) if body else 0} bytes)"
     if not body.startswith(b"%PDF"): return False, f"not PDF (head={body[:8]!r})"
+    if b"%%EOF" not in body[-1024:]: return False, "truncated (no %%EOF trailer)"
     dest.write_bytes(body)
     return True, "ok"
 
@@ -266,8 +297,10 @@ def write_abstract_sidecar(row: dict, abstract: str, dest: Path):
         "arxiv_id": row["arxiv_id"],
         "openreview_id": row["openreview_id"],
         "anthology_id": row["anthology_id"],
+        "doi": row["doi"],
         "abstract_url": row["abstract_url"],
         "pdf_url": row["pdf_url"],
+        "code_url": row["code_url"],
     }
     lines = ["---"]
     for k, v in fm.items():
@@ -280,7 +313,7 @@ def write_abstract_sidecar(row: dict, abstract: str, dest: Path):
         lines.append(f"**Notes:** {row['notes']}\n")
     lines.append("## Abstract\n")
     lines.append(abstract.strip() + "\n")
-    dest.write_text("\n".join(lines))
+    dest.write_text("\n".join(lines), encoding="utf-8")
 
 # ---------- Main ----------
 
@@ -293,26 +326,32 @@ def process_row(row: dict, raw_base: Path) -> tuple[str, str]:
     pdf_path = venue_dir / f"{row['slug']}.pdf"
     abs_path = venue_dir / f"{row['slug']}.abstract.md"
 
-    pdf_ok = pdf_path.exists() and pdf_path.stat().st_size > 1024
-    abs_ok = abs_path.exists() and abs_path.stat().st_size > 100
+    pdf_done = pdf_ok(pdf_path)   # integrity check, not just existence
+    abs_done = abs_path.exists() and abs_path.stat().st_size > 100
 
-    if not abs_ok:
+    if not abs_done:
         text, err = get_abstract(row)
         if text:
             write_abstract_sidecar(row, text, abs_path)
-            abs_ok = True
+            abs_done = True
         else:
             return "failed", f"abstract: {err}"
 
-    if not pdf_ok:
+    if not pdf_done:
         ok, strategy, err = get_pdf_for_row(row, pdf_path)
         if ok:
             return "downloaded", strategy
-        elif abs_ok:
+        elif abs_done:
             return "partial", f"pdf: {err}"
         else:
             return "failed", f"pdf: {err}"
     return "downloaded", "already on disk"
+
+def normalize_error(detail: str) -> str:
+    """Aggregate error reasons WITHOUT losing HTTP status codes: 404 vs 429
+    demand opposite responses (fix URLs vs slow down), so only non-status
+    digits (ids, sizes) are collapsed to N."""
+    return re.sub(r"(?<!HTTP )\b\d+\b", "N", detail).split(";")[0][:80]
 
 def main():
     ap = argparse.ArgumentParser()
@@ -333,7 +372,7 @@ def main():
     error_log = topic_dir / "collection" / "download-errors.log"
     error_log.parent.mkdir(parents=True, exist_ok=True)
 
-    all_rows = list(csv.DictReader(open(manifest), delimiter="\t"))
+    all_rows = read_rows(manifest)
     queue = [r for r in all_rows if r["downloaded"] in ("", "no")]
     if args.id:
         queue = [r for r in queue if r["id"] == args.id]
@@ -353,7 +392,7 @@ def main():
         queue = queue[:args.max]
 
     print(f"Processing {len(queue)} rows.", flush=True)
-    errors_f = open(error_log, "a")
+    errors_f = open(error_log, "a", encoding="utf-8")
     errors_f.write(f"\n=== run start {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
     stats = defaultdict(int)
     error_reasons: dict[str, int] = defaultdict(int)
@@ -365,20 +404,19 @@ def main():
         by_venue[f"{row['venue']}_{row['year']}"][status] += 1
         if status in ("failed", "partial"):
             errors_f.write(f"{row['id']}\t{status}\t{detail}\t{row['title'][:80]}\n")
-            key = re.sub(r"\d+", "N", detail).split(";")[0][:80]
-            error_reasons[key] += 1
+            error_reasons[normalize_error(detail)] += 1
         if status == "downloaded":
             row["downloaded"] = "yes"
         if i % 25 == 0 or i == len(queue):
+            # Checkpoint: atomic manifest write + flushed error log, so a
+            # mid-run crash loses at most 25 rows of bookkeeping.
+            write_rows(manifest, all_rows)
+            errors_f.flush()
             print(f"  [{i}/{len(queue)}] dl={stats['downloaded']} partial={stats['partial']} failed={stats['failed']}", flush=True)
 
     errors_f.close()
-
-    # Write manifest back
-    with open(manifest, "w") as f:
-        w = csv.DictWriter(f, fieldnames=HEADERS, delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\")
-        w.writeheader()
-        for r in all_rows: w.writerow(r)
+    if queue:
+        write_rows(manifest, all_rows)
 
     print("\n=== SUMMARY ===")
     for k in ("downloaded", "partial", "failed", "skipped"):

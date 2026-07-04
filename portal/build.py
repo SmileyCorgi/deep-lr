@@ -7,9 +7,16 @@ YAML-ish list/value parser, regex wikilink extraction. The portal renderer is
 runtime-static — this script is the only place that knows how to walk the repo.
 
 Usage:
-    python3 portal/build.py            # write html/portal/index.json
-    python3 portal/build.py --lint     # validate only; no write; warn on orphans/broken links
-    python3 portal/build.py --strict   # lint warnings become non-zero exit
+    python portal/build.py            # write html/portal/index.json
+    python portal/build.py --lint     # validate only; no write
+    python portal/build.py --strict   # lint warnings become non-zero exit
+
+Lint checks (mechanical rules stay in scripts, not in LLM memory):
+    broken wikilinks · orphan pages · malformed wikilinks (e.g. spaces) ·
+    duplicate slugs · frontmatter contract (type enum, date formats,
+    entity_kind on entities, deprecated fields) · index.md coverage drift ·
+    stale pages (cited but long-unupdated) · merge candidates (high out-link
+    overlap)
 
 Output shape (abridged; see emit_index for full):
 
@@ -63,10 +70,34 @@ OUT_PATH = os.path.join(REPO_ROOT, "html", "portal", "index.json")
 TOPIC_SUBDIR_TYPE = "corpus"
 
 WIKI_RE = re.compile(r"\[\[([A-Za-z0-9][A-Za-z0-9._\-/]*)(?:\|[^\]\n]+)?\]\]")
+# Any [[...]] that WIKI_RE would silently skip (spaces, leading symbols, …) —
+# silent misses corrupt the graph/orphan analysis, so lint makes them loud.
+RAW_WIKI_RE = re.compile(r"\[\[([^\]]*)\]\]")
+# Typed links: a small closed verb set (open vocabularies drift into synonyms).
+# Dataview-compatible inline fields: `improves:: [[x]]`.
+TYPED_LINK_VERBS = ("improves", "refutes", "uses", "extends")
+TYPED_RE = re.compile(
+    r"\b(%s)::\s*\[\[([A-Za-z0-9][A-Za-z0-9._\-/]*)(?:\|[^\]\n]+)?\]\]"
+    % "|".join(TYPED_LINK_VERBS))
+ALLOWED_TYPES = {"topic", "entity", "concept", "comparison", "benchmark",
+                 "synthesis", "corpus"}
+ENTITY_KINDS = {"paper", "method", "dataset", "model", "person", "org"}
+DATE_FM_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+STALE_DAYS = 90
 LOG_HEADER_RE = re.compile(r"^## \[(\d{4}-\d{2}-\d{2})\] ([a-z\-]+) \| (.+)$")
 H1_RE = re.compile(r"^# (.+)$", re.MULTILINE)
 H2_RE = re.compile(r"^## (.+)$", re.MULTILINE)
 TLDR_RE = re.compile(r"^## TL;DR\s*\n(.+?)(?:\n## |\Z)", re.DOTALL | re.MULTILINE)
+
+
+# Console output must survive non-UTF-8 terminals (Windows cp936/GBK):
+# degrade unencodable characters instead of crashing the lint run.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(errors="replace")
+        except (ValueError, OSError):
+            pass
 
 
 def _err(msg):
@@ -156,7 +187,7 @@ def extract_tldr(body, page_type):
         tldr = re.sub(r"^>\s*", "", tldr, flags=re.MULTILINE)
         # First paragraph only.
         para = tldr.split("\n\n")[0].strip()
-        return _clip(para, 320)
+        return _clip(para.replace("**", ""), 320)
     # Fallback: first non-empty prose paragraph after H1.
     parts = re.split(r"\n# .+\n", body, maxsplit=1)
     rest = parts[1] if len(parts) > 1 else body
@@ -166,7 +197,7 @@ def extract_tldr(body, page_type):
             continue
         if s.startswith("---"):
             continue
-        return _clip(re.sub(r"\s+", " ", s), 320)
+        return _clip(re.sub(r"\s+", " ", s).replace("**", ""), 320)
     return ""
 
 
@@ -200,6 +231,59 @@ def extract_outlinks(body):
     return seen
 
 
+def extract_typed_links(body):
+    """`verb:: [[slug]]` typed links. Returns [(verb, slug), ...] deduped."""
+    out = []
+    seen = set()
+    for m in TYPED_RE.finditer(body):
+        pair = (m.group(1), m.group(2).strip())
+        if pair not in seen:
+            seen.add(pair)
+            out.append(pair)
+    return out
+
+
+def find_malformed_wikilinks(body):
+    """[[...]] spans that WIKI_RE silently skips — these vanish from the graph,
+    backlinks, and orphan detection, so they must be loud, not silent."""
+    bad = []
+    for m in RAW_WIKI_RE.finditer(body):
+        target = m.group(1).split("|")[0].strip()
+        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._\-/]*$", target):
+            bad.append(m.group(1)[:60])
+    return bad
+
+
+def lint_frontmatter(page):
+    """The frontmatter contract from CLAUDE.md §5, machine-checked."""
+    issues = []
+    if page["type"] == "corpus":
+        # Corpus subdir pages (READMEs, verify.py reports) are working
+        # artifacts, not wiki contract pages.
+        return issues
+    meta = page["frontmatter"]
+    t = meta.get("type", "")
+    if not t:
+        issues.append("missing frontmatter `type`")
+    elif t not in ALLOWED_TYPES:
+        issues.append("invalid type %r (allowed: %s)" % (t, sorted(ALLOWED_TYPES)))
+    for k in ("created", "updated"):
+        v = meta.get(k, "")
+        if v and not DATE_FM_RE.match(str(v)):
+            issues.append("%s not YYYY-MM-DD: %r" % (k, v))
+    if page["type"] == "entity":
+        ek = meta.get("entity_kind", "")
+        if not ek:
+            issues.append("entity page missing `entity_kind`")
+        elif ek not in ENTITY_KINDS:
+            issues.append("invalid entity_kind %r (allowed: %s)"
+                          % (ek, sorted(ENTITY_KINDS)))
+    if "sources" in meta:
+        issues.append("deprecated field `sources` — drop it; "
+                      "backlink counts are computed by this script")
+    return issues
+
+
 def walk_wiki():
     """Yield (page_type, slug, abs_path, rel_path) for every .md under wiki/.
     Topic subdir pages (under wiki/topics/<sub>/) get type "corpus" so the
@@ -215,7 +299,9 @@ def walk_wiki():
                     continue
                 abs_path = os.path.join(dirpath, fn)
                 rel_to_sub = os.path.relpath(abs_path, root)  # e.g. memory.md or corpus/README.md
-                rel_to_repo = os.path.relpath(abs_path, REPO_ROOT)
+                # Forward slashes always: this string becomes a URL in the
+                # portal ("Source" link) — os.sep backslashes break it.
+                rel_to_repo = os.path.relpath(abs_path, REPO_ROOT).replace(os.sep, "/")
                 if os.sep in rel_to_sub:
                     # Subdirectory page — slug includes the dir, type = corpus.
                     slug = slug_for(rel_to_sub).replace(os.sep, "/")
@@ -332,10 +418,13 @@ INDEX_SUMMARY_RE = re.compile(
 
 
 def parse_index_summaries(path):
-    """Map slug -> one-line human-curated summary scraped from index.md."""
+    """Map slug -> one-line human-curated summary scraped from index.md.
+    Returns (summaries, unparsed) — unparsed lines look like entries but fail
+    the pattern; they are reported by lint instead of silently dropped."""
     out = {}
+    unparsed = []
     if not os.path.isfile(path):
-        return out
+        return out, unparsed
     with open(path, encoding="utf-8") as fh:
         for line in fh:
             stripped = line.strip()
@@ -344,13 +433,30 @@ def parse_index_summaries(path):
             # Extract anchor text + everything after the em-dash separator.
             m = re.match(r"-\s+\[(?:\*\*)?([^\]\*]+)(?:\*\*)?\]\([^)]+\)\s+—\s+(.+)$", stripped)
             if not m:
+                unparsed.append(stripped[:100])
                 continue
             label = m.group(1).strip().lower()
             summary = m.group(2).strip()
             # Normalize markdown emphasis off of the summary.
             summary = re.sub(r"_\*+_?", "", summary)
             out[label] = summary
-    return out
+    return out, unparsed
+
+
+def parse_index_targets(path):
+    """All markdown link targets in index.md, normalized repo-relative —
+    used to detect drift between the hand-curated index and wiki/ contents."""
+    targets = set()
+    if not os.path.isfile(path):
+        return targets
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    for m in re.finditer(r"\]\(([^)#]+)", text):
+        t = m.group(1).strip()
+        if t.startswith("./"):
+            t = t[2:]
+        targets.add(t.replace("\\", "/"))
+    return targets
 
 
 # ---------- manifest counters (best-effort) ---------------------------------
@@ -414,6 +520,7 @@ def derive_topic_membership(pages):
 def build():
     pages = []
     slug_index = {}
+    duplicate_slugs = []
 
     for page_type, slug, abs_path, rel_path in walk_wiki():
         try:
@@ -423,6 +530,11 @@ def build():
             _warn("read failed %s: %s" % (rel_path, e))
             continue
         meta, body = parse_frontmatter(raw, rel_path)
+        # Frontmatter `type:` is the contract; the directory is only a default.
+        # This is what lets a benchmark page live in wiki/comparisons/.
+        fm_type = str(meta.get("type", ""))
+        if fm_type in ALLOWED_TYPES and page_type != TOPIC_SUBDIR_TYPE:
+            page_type = fm_type
         page = {
             "slug": slug,
             "type": page_type,
@@ -433,6 +545,7 @@ def build():
             "tldr": extract_tldr(body, page_type),
             "h2": extract_h2(body),
             "out_links": extract_outlinks(body),
+            "typed_links": [{"rel": v, "target": t} for v, t in extract_typed_links(body)],
             "updated": meta.get("updated", ""),
             "created": meta.get("created", ""),
             "tags": meta.get("tags", []) if isinstance(meta.get("tags", []), list) else [],
@@ -440,11 +553,17 @@ def build():
             "track": meta.get("track", ""),
             "category": meta.get("category", ""),
             "entity_kind": meta.get("entity_kind", ""),
+            "status": meta.get("status", ""),
+            "human_verified": meta.get("human_verified", ""),
+            "malformed_links": find_malformed_wikilinks(body),
         }
         pages.append(page)
         if slug in slug_index:
             _warn("duplicate slug %s (%s vs %s)" %
                   (slug, slug_index[slug]["path"], rel_path))
+            duplicate_slugs.append({"slug": slug,
+                                    "a": slug_index[slug]["path"],
+                                    "b": rel_path})
         slug_index[slug] = page
 
     # Backlinks + broken-link detection.
@@ -463,10 +582,10 @@ def build():
                 broken.append({"from": p["slug"], "target": tgt})
 
     # Orphans = pages with zero inbound wikilinks AND not topics (topics are
-    # entry points by design).
+    # entry points by design; corpus pages are working artifacts).
     orphans = []
     for p in pages:
-        if p["type"] in ("topic", "synthesis"):
+        if p["type"] in ("topic", "synthesis", "corpus"):
             continue
         if not backlinks.get(p["slug"]):
             orphans.append(p["slug"])
@@ -479,10 +598,17 @@ def build():
     ideas = parse_ideas(IDEAS_PATH)
 
     # Curated summaries from index.md (override topic tldrs when available).
-    curated = parse_index_summaries(INDEX_MD_PATH)
+    curated, index_unparsed = parse_index_summaries(INDEX_MD_PATH)
     for p in pages:
         if p["type"] == "topic" and p["slug"] in curated:
             p["curated_summary"] = curated[p["slug"]]
+
+    # Index drift: wiki pages the hand-curated index.md forgot to list.
+    # (index.md keeps the human one-liners; this script keeps it honest.)
+    index_targets = parse_index_targets(INDEX_MD_PATH)
+    index_missing = [p["path"].replace(os.sep, "/") for p in pages
+                     if p["type"] != "corpus"
+                     and p["path"].replace(os.sep, "/") not in index_targets]
 
     # Stats.
     venue_year = {}
@@ -514,6 +640,7 @@ def build():
         "entities": counts_by_type.get("entity", 0),
         "synthesis": counts_by_type.get("synthesis", 0),
         "comparisons": counts_by_type.get("comparison", 0),
+        "benchmarks": counts_by_type.get("benchmark", 0),
         "concepts": counts_by_type.get("concept", 0),
         "corpus_pages": counts_by_type.get("corpus", 0),
         "manifest_papers": papers_in_manifest,
@@ -546,6 +673,7 @@ def build():
             "degree_out": 0,
         }
     edges_map = {}  # (src,tgt) -> weight
+    edge_rels = {}  # (src,tgt) -> typed relation, when one was declared
     for p in pages:
         if p["slug"] not in nodes_by_id:
             continue
@@ -554,15 +682,82 @@ def build():
                 continue
             key = (p["slug"], tgt)
             edges_map[key] = edges_map.get(key, 0) + 1
+        for tl in p["typed_links"]:
+            if tl["target"] in nodes_by_id:
+                key = (p["slug"], tl["target"])
+                edges_map.setdefault(key, 1)
+                edge_rels[key] = tl["rel"]
     edges = []
     for (src, tgt), w in edges_map.items():
-        edges.append({"source": src, "target": tgt, "weight": w})
+        edges.append({"source": src, "target": tgt, "weight": w,
+                      "rel": edge_rels.get((src, tgt), "mentions")})
         nodes_by_id[src]["degree_out"] += 1
         nodes_by_id[tgt]["degree_in"] += 1
     graph = {"nodes": list(nodes_by_id.values()), "edges": edges}
 
+    # ---- lint payloads (computed here, reported in main) ----
+
+    # Frontmatter contract violations.
+    fm_issues = []
+    for p in pages:
+        for issue in lint_frontmatter(p):
+            fm_issues.append({"page": p["slug"], "issue": issue})
+
+    # Malformed wikilinks (silently invisible to the graph otherwise).
+    malformed = [{"page": p["slug"], "raw": raw_link}
+                 for p in pages for raw_link in p["malformed_links"]]
+
+    # Stale: cited from somewhere but not updated in STALE_DAYS — a finite
+    # re-read list, instead of "remember to look for stale claims".
+    today = _dt.date.today()
+    stale = []
+    for p in pages:
+        u = p.get("updated", "")
+        if not (u and DATE_FM_RE.match(str(u)) and backlinks.get(p["slug"])):
+            continue
+        try:
+            age = (today - _dt.date.fromisoformat(str(u))).days
+        except ValueError:
+            continue
+        if age > STALE_DAYS:
+            stale.append({"page": p["slug"], "updated": u, "age_days": age,
+                          "inbound": len(backlinks[p["slug"]])})
+    stale.sort(key=lambda x: -x["age_days"])
+
+    # Merge candidates: two non-topic pages whose out-link sets overlap
+    # heavily probably cover the same ground (operational stand-in for the
+    # unenforceable "overlap > 60%" prose rule). Only entity-to-entity links
+    # count — everything links the same topic/synthesis hubs, which would
+    # flag every anchor pair as a false positive.
+    def _entity_links(p):
+        return {t for t in p["out_links"]
+                if slug_index.get(t, {}).get("type") == "entity"}
+    merge_candidates = []
+    linkful = [(p, _entity_links(p)) for p in pages
+               if p["type"] not in ("topic", "corpus")]
+    linkful = [(p, s) for p, s in linkful if len(s) >= 3]
+    for i in range(len(linkful)):
+        pi, si = linkful[i]
+        for j in range(i + 1, len(linkful)):
+            pj, sj = linkful[j]
+            jac = len(si & sj) / len(si | sj)
+            if jac > 0.5:
+                merge_candidates.append({"a": pi["slug"], "b": pj["slug"],
+                                         "jaccard": round(jac, 2)})
+
+    lint = {
+        "duplicate_slugs": duplicate_slugs,
+        "frontmatter_issues": fm_issues,
+        "malformed_wikilinks": malformed,
+        "index_md_missing": index_missing,
+        "index_md_unparsed": index_unparsed,
+        "stale_pages": stale,
+        "merge_candidates": merge_candidates,
+    }
+
     # Final assembly.
     out = {
+        "schema": 1,
         "generated": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "stats": stats,
         "pages": pages,
@@ -573,6 +768,7 @@ def build():
         "graph": graph,
         "orphans": orphans,
         "broken_links": broken,
+        "lint": lint,
     }
     return out
 
@@ -605,8 +801,32 @@ def main():
     if out["orphans"]:
         _info("%d orphan entities (no inbound wikilinks)" % len(out["orphans"]))
 
+    lint = out["lint"]
+    for item in lint["frontmatter_issues"][:20]:
+        _warn("frontmatter %s: %s" % (item["page"], item["issue"]))
+    if len(lint["frontmatter_issues"]) > 20:
+        _warn("  ... (%d more frontmatter issues)" % (len(lint["frontmatter_issues"]) - 20))
+    for item in lint["malformed_wikilinks"][:10]:
+        _warn("malformed wikilink in %s: [[%s]] (invisible to graph/backlinks)"
+              % (item["page"], item["raw"]))
+    for path in lint["index_md_missing"][:10]:
+        _warn("index.md does not list %s" % path)
+    for line in lint["index_md_unparsed"][:5]:
+        _warn("index.md entry not parseable (want `- [slug](path) — summary`): %s" % line)
+    for item in lint["stale_pages"][:10]:
+        _info("stale: %s (updated %s, %d days ago, %d inbound links)"
+              % (item["page"], item["updated"], item["age_days"], item["inbound"]))
+    for item in lint["merge_candidates"][:10]:
+        _info("merge candidate: %s <-> %s (out-link Jaccard %.2f)"
+              % (item["a"], item["b"], item["jaccard"]))
+
+    hard_findings = (out["broken_links"] or out["orphans"]
+                     or lint["duplicate_slugs"]
+                     or lint["frontmatter_issues"] or lint["malformed_wikilinks"]
+                     or lint["index_md_missing"] or lint["index_md_unparsed"])
+
     if args.lint:
-        if args.strict and (out["broken_links"] or out["orphans"]):
+        if args.strict and hard_findings:
             return 1
         return 0
 
@@ -616,7 +836,7 @@ def main():
     sz = os.path.getsize(OUT_PATH)
     _info("wrote %s (%.1f KB)" % (os.path.relpath(OUT_PATH, REPO_ROOT), sz / 1024.0))
 
-    if args.strict and (out["broken_links"] or out["orphans"]):
+    if args.strict and hard_findings:
         return 1
     return 0
 

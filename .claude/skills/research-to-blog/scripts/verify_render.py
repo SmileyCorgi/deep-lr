@@ -9,19 +9,20 @@ can eyeball that each diagram is legible and premium ("a finished figure, not a 
 of text"). Exit code 0 = clean, 1 = problems found.
 
 Usage:
-    python3 verify_render.py <slug> [--base http://127.0.0.1:8765] [--out /tmp/canvas_check]
+    python verify_render.py <slug> [--base http://127.0.0.1:8765] [--out DIR]
 
-Assumes the static server is already running (start from repo root:
-    python3 -m http.server 8765 ). Requires Playwright (pip install playwright;
-playwright install chromium).
+--out defaults to <system temp>/canvas_check (portable; /tmp does not exist
+on Windows). Assumes the static server is already running (start from repo
+root: python -m http.server 8765). Requires Playwright (pip install
+playwright; playwright install chromium).
 """
-import argparse, json, os, sys
+import argparse, json, os, sys, tempfile
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("slug")
     ap.add_argument("--base", default="http://127.0.0.1:8765")
-    ap.add_argument("--out", default="/tmp/canvas_check")
+    ap.add_argument("--out", default=os.path.join(tempfile.gettempdir(), "canvas_check"))
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 

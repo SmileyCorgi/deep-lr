@@ -20,7 +20,7 @@ User feedback verbatim: *"我更喜欢PM-B设计的，这个很好"* — direct 
 ## What this decision does NOT cover (still TBD post-build)
 
 - First-post content draft (Phase E). The dev build only needs to render an empty-or-near-empty catalog correctly; first post writing happens after the site is verified.
-- Hosting / deploy story. Local-first for now (`python3 -m http.server` from repo root).
+- Hosting / deploy story. Local-first for now (`python -m http.server` from repo root).
 
 ---
 

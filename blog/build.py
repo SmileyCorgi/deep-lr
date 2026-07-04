@@ -8,10 +8,10 @@ required keys, prints clear errors, exits non-zero on bad post. Lints
 entities or entities lacking the metadata the references modal needs.
 
 Usage:
-    python3 blog/build.py                  # public index (drops status: draft)
-    python3 blog/build.py --include-drafts # include drafts (for local preview)
-    python3 blog/build.py --lint           # lint only, do not write index.json
-    python3 blog/build.py --strict         # treat citation warnings as errors
+    python blog/build.py                  # public index (drops status: draft)
+    python blog/build.py --include-drafts # include drafts (for local preview)
+    python blog/build.py --lint           # lint only, do not write index.json
+    python blog/build.py --strict         # treat citation warnings as errors
 
 The generated file is blog/index.json, sorted by date desc, of the shape:
 
@@ -50,7 +50,11 @@ ALLOWED_STATUS = {"draft", "published"}
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 WORDS_PER_MIN = 220  # rough reading-rate target
 
-CITE_RE = re.compile(r"\[\[([a-z0-9][a-z0-9_\-]*)(?:\|[^\]]+)?\]\]")
+# Aligned with html/lib/markdown.js and portal/build.py WIKI_RE: anything the
+# client renders as a citation must be LINTED, not silently skipped. Slugs
+# that then fail the entity-existence check surface as warnings — which is
+# exactly what a non-canonical slug like [[MemGPT-2023]] deserves.
+CITE_RE = re.compile(r"\[\[([A-Za-z0-9][A-Za-z0-9._\-/]*)(?:\|[^\]]+)?\]\]")
 
 
 def _err(msg):
@@ -377,7 +381,9 @@ def main():
         return
 
     out = {
-        "generated": _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "schema": 1,
+        "generated": _dt.datetime.now(_dt.timezone.utc).replace(
+            microsecond=0, tzinfo=None).isoformat() + "Z",
         "posts": posts,
     }
     with open(OUT_PATH, "w", encoding="utf-8") as f:

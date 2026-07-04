@@ -36,6 +36,11 @@ Infer the mode from the user request, or use the named mode if the user asks for
 
 ## Boundary With good-story
 
+> **Note:** `good-story` is NOT bundled with this repo — don't go looking for
+> it in `.claude/skills/`. Everything below applies only if the user has
+> installed it separately; otherwise the fallback behavior described here is
+> the normal behavior.
+
 Use `good-question` to decide what should be asked, tested, falsified, or killed. Use `good-story`, when it is available, to decide how existing evidence, figures, drafts, abstracts, or results should be organized into an honest scientific narrative.
 
 This boundary is a routing preference, not a capability reduction. If `good-story` is not available, `good-question` may still handle story-adjacent requests such as paper angles, proposal pitches, significance framing, abstract direction, or high-impact positioning. In that fallback mode, keep the answer question-first: clarify the claim, stake, evidence, assumptions, falsifier, reviewer risk, and next test. Label full narrative, figure-order, or prose-craft advice as provisional rather than pretending this skill is a complete writing-story framework.

@@ -32,6 +32,20 @@ arXiv abstract/PDF URL · a local PDF in `raw/papers/` · a `wiki/` synthesis or
 page · a topic name · a wrapped-up conversation/thread. If the source is ambiguous or
 multiple, ask one short question; otherwise proceed.
 
+## Two house styles
+
+| Style | When | Shape |
+|---|---|---|
+| **Distillation** (default) | 单篇论文 / 单个 synthesis 的浓缩 | 4–9 figures，极简散文，图带论证 |
+| **Tutorial**（教学长文，Lilian Weng 式） | 用户要"全面的教学类"文章覆盖一个技术领域 | 10–14 编号节、10–13 figures；每节 1–3 句 + 图 + **坑/误解**拆解；倒数第二节"学习地图"收束（自查清单 + 深挖阅读路径 + 经典博客延伸阅读映射表）；末节按主题分组的完整文献清单。骨架：`meta/templates/blog-post-tutorial.md` |
+
+Tutorial 风格的硬约定（实测踩坑，模板注释里有完整清单）：无 LaTeX（公式用
+行内代码）；matrix rows 用**多字母**标签（单字母 A/T/M/S 会被渲染器自动
+别名成 Agent/Tool/Memory/Skill）；`[[entity]]` 只给会反复引用的锚点论文，
+长尾文献用文末分组的普通链接；中英混排后检查形近非 ASCII 字符（如西里尔
+字母）混入；成稿后对照相关经典博客（如 Lilian Weng 归档）把互补文章编成
+映射表并做内联指引。
+
 ## Pipeline
 
 ### 1. Analyze the source
@@ -73,10 +87,10 @@ Aim for **4–9 figures**. If a section has no diagrammable shape, keep it to a 
 
 ### 5. Verify the render (do not skip — this is why v1 looked flat)
 ```bash
-python3 blog/build.py --include-drafts --lint     # 0 warnings on the new post
-python3 blog/build.py --include-drafts            # put draft in index.json for preview
-( python3 -m http.server 8765 >/tmp/agentblog.log 2>&1 & )   # if not already up
-python3 .claude/skills/research-to-blog/scripts/verify_render.py <slug>
+python blog/build.py --include-drafts --lint     # 0 warnings on the new post
+python blog/build.py --include-drafts            # put draft in index.json for preview
+( python -m http.server 8765 >/tmp/agentblog.log 2>&1 & )   # if not already up
+python .claude/skills/research-to-blog/scripts/verify_render.py <slug>
 ```
 `verify_render.py` reports figure count/types, degraded blocks, console errors, and writes
 a full-page screenshot + per-figure crops to `/tmp/canvas_check/`. **Read the crops** — every
@@ -87,7 +101,7 @@ any `data-canvas-error`, truncation, or overflow, then re-run.
 - Give the user the preview URL `http://127.0.0.1:8765/html/post.html?slug=<slug>`, a one-line
   summary of the figures, and any honesty flags (qualitative charts, unverified IDs).
 - Leave `status: draft`. Only on the user's explicit "publish": flip to `published`, run the
-  §6 pre-publish checklist, `python3 blog/build.py` (drops drafts), confirm on the homepage,
+  §6 pre-publish checklist, `python blog/build.py` (drops drafts), confirm on the homepage,
   append a `log.md` `blog | published` line.
 
 ## Canvas DSL cheat-sheet (canonical: `blog/README.md` §10)

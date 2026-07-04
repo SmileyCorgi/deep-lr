@@ -35,7 +35,7 @@ Claude's job is to *propose* — never to publish autonomously.
 2. User reviews; iterates with Claude on the draft.
 3. User says publish. Claude flips `status: draft → published` and runs the
    pre-publish checklist (§6).
-4. `python3 blog/build.py` regenerates `index.json`. Post appears on the
+4. `python blog/build.py` regenerates `index.json`. Post appears on the
    homepage.
 
 **Hard rules:**
@@ -230,12 +230,12 @@ Before flipping a post from `draft` to `published`:
 
 ```bash
 # 1. lint the post + its citations
-python3 blog/build.py --include-drafts --lint
+python blog/build.py --include-drafts --lint
 
 # 2. fix any warnings (missing entities, missing TL;DR/Authors/Venue/link in entities)
 
 # 3. open the draft and read it end-to-end in the rendered view
-python3 blog/build.py --include-drafts
+python blog/build.py --include-drafts
 open "http://127.0.0.1:8765/html/post.html?slug=<slug>"
 
 # 4. visual gate (eyeball, not automated):
@@ -248,7 +248,7 @@ open "http://127.0.0.1:8765/html/post.html?slug=<slug>"
 #    status: draft  →  status: published
 
 # 6. regen the public index (drops drafts, includes the freshly-published post)
-python3 blog/build.py
+python blog/build.py
 
 # 7. confirm it appears on the homepage
 open "http://127.0.0.1:8765/html/index.html"
@@ -257,7 +257,7 @@ open "http://127.0.0.1:8765/html/index.html"
 For a stricter publish gate (treat citation warnings as errors):
 
 ```bash
-python3 blog/build.py --strict
+python blog/build.py --strict
 ```
 
 ---
@@ -284,10 +284,10 @@ others.
 
 | Command | When to run |
 |---|---|
-| `python3 blog/build.py` | After every post add / edit. Drops drafts. |
-| `python3 blog/build.py --include-drafts` | Local preview including drafts. |
-| `python3 blog/build.py --lint` | Pre-publish citation lint, no write. |
-| `python3 blog/build.py --strict` | Publish gate: warnings → errors. |
+| `python blog/build.py` | After every post add / edit. Drops drafts. |
+| `python blog/build.py --include-drafts` | Local preview including drafts. |
+| `python blog/build.py --lint` | Pre-publish citation lint, no write. |
+| `python blog/build.py --strict` | Publish gate: warnings → errors. |
 
 **What lint catches** (warnings, not errors by default):
 

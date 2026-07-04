@@ -27,16 +27,28 @@ Launch two `general-purpose` subagents concurrently with an explicit
   diffs). Threshold on the channel's own signal (e.g. upvotes ≥ N).
 - Coordination rule: Channel B wins overlaps; Channel A biases to non-trending
   discovery. Each returns ~8 picks with ids, one-line reasons, and signal
-  stats.
+  stats — plus its **reject list** (ids + one-line reason each) so the
+  filtering is auditable, not silent. Rejects go into the log entry body.
 
-### 3. Download & file
+### 2.5 Dedup against the existing wiki (before any download)
+For every pick: grep `wiki/topics/*/manifest.tsv` (arxiv_id + normalized
+title) and `wiki/entities/` (slug + aliases). Hit in a manifest → the corpus
+owns it; skip. Hit in entities → update the existing page (new venue/version
+goes in its frontmatter and Links), don't re-file. Two pipelines that don't
+check each other double-file the same paper under two slugs.
+
+### 3. Download & file (tiered, same rule as lit-harvest)
 - Download PDFs to `raw/papers/` as `YYYY-MM-DD_<author>-<slug>.pdf` via a
   bounded script (sequential, ~4 s spacing, `--max-time` set; validate PDF
-  magic bytes) — not via agent loops.
+  magic bytes) — not via agent loops. Write an `.abstract.md` sidecar next to
+  each PDF (same format as the harvest downloader) so later corpus harvests
+  can reconcile.
 - Verify title/authors/date against the live abstract page before writing.
-- One entity page per paper in `wiki/entities/` using the sweep layout:
-  frontmatter + TL;DR + **Abstract / Methodology / Experimental Design /
-  Results / Key Takeaways** + Links.
+- **Tiering, not one-page-per-paper**: only the 2–3 picks with the hardest
+  signal get full entity pages (`meta/templates/entity-page.md`, honest
+  `reading:` value); the rest get 1-line tail entries in the relevant
+  `wiki/topics/` page. At CV-arXiv volume (100+/day), page-per-pick drowns
+  the wiki in stubs.
 
 ### 4. Cross-cluster signals
 After filing, write 3–5 bullets on what the batch says *together* (converging
@@ -48,7 +60,8 @@ Put these in the `log.md` entry and in `index.md`'s batch block.
 - Topic-page touch-ups may be **queued** ("pending topic touch-up") if the
   batch is large — but record the queue explicitly in the log entry so it
   isn't lost.
-- `log.md`: `## [YYYY-MM-DD] ingest | N latest <field> papers (<channels> sweep)`.
+- `log.md`: `## [YYYY-MM-DD] ingest | N latest <field> papers (<channels> sweep)`
+  — include the reject lists. Commit.
 
 ## Recurring use
 For standing monitoring, the user can schedule this skill (e.g. via /schedule
